@@ -128,7 +128,7 @@ angular.module("cybersponse", []); // eslint-disable-line no-undef
 
 // Side-effect require: executes the controller IIFE, registering
 // jinjaEditorWidget113DevCtrl against the cybersponse module.
-require("./view.controller.js");
+require("../widget/view.controller.js");
 
 const CTRL_NAME = "jinjaEditorWidget113DevCtrl";
 
