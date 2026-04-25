@@ -928,6 +928,34 @@
       return { found: true, value: val };
     }
 
+    // Pure function: collectLocalNames
+    // Scans {% set/for/with/macro %} tags and returns the set of names they
+    // bind. These are template-local and won't be present in inputData, so
+    // checkInputPaths must not flag expressions rooted at them.
+    function collectLocalNames(templateText) {
+      const names = new Set();
+      if (!templateText) return names;
+      const tagRegex = /\{%-?\s*([\s\S]*?)\s*-?%\}/g;
+      let m;
+      while ((m = tagRegex.exec(templateText)) !== null) {
+        const body = m[1].trim();
+        let sm;
+        if ((sm = body.match(/^set\s+([A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s*=/))) {
+          sm[1].split(",").forEach(function (n) { names.add(n.trim()); });
+        } else if ((sm = body.match(/^for\s+([A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s+in\s+/))) {
+          sm[1].split(",").forEach(function (n) { names.add(n.trim()); });
+        } else if ((sm = body.match(/^with\s+([A-Za-z_][\w]*)\s*=/))) {
+          names.add(sm[1]);
+        } else if ((sm = body.match(/^macro\s+[A-Za-z_][\w]*\s*\(([^)]*)\)/))) {
+          sm[1].split(",").forEach(function (p) {
+            const name = p.split("=")[0].trim();
+            if (name) names.add(name);
+          });
+        }
+      }
+      return names;
+    }
+
     // Pure function: checkInputPaths
     // Extracts {{ expr }} blocks, strips filters, validates against inputData.
     // Returns array of { line, path, message }
@@ -936,6 +964,7 @@
       const findings = [];
       const lines = templateText.split("\n");
       const pathsChecked = new Set();
+      const localNames = collectLocalNames(templateText);
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const line = lines[lineNum];
         const exprRegex = /\{\{([^}]*)\}\}/g;
@@ -950,6 +979,8 @@
               expr.match(/^(if|for|with|macro|call|set|block|extends|include)\s/i)) {
             continue;
           }
+          const rootMatch = expr.match(/^([A-Za-z_][\w]*)/);
+          if (rootMatch && localNames.has(rootMatch[1])) continue;
           if (pathsChecked.has(expr)) continue;
           pathsChecked.add(expr);
           const res = resolveInputPath(inputData, expr);
