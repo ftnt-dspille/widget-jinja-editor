@@ -69,16 +69,23 @@
           // Wrap fragments so bare <tr>/<td> render with default table styles.
           var needsWrap = /^<\s*(tr|td|th)\b/i.test(trimmed);
           var body = needsWrap ? "<table>" + trimmed + "</table>" : trimmed;
+          // Always render the preview on a light surface. SOAR's stylesheets
+          // ship dark-theme rules for json2html tables (dark cell bg + dim
+          // text) that wreck contrast against any non-themed body. Pinning the
+          // body to a light palette and overriding cell colors keeps text
+          // readable while leaving SOAR's structural styling (borders, header
+          // accents) intact.
           iframe.srcdoc =
             "<!doctype html><html><head><meta charset=\"utf-8\"><base href=\"" +
             document.baseURI + "\">" +
             collectStylesheetLinks() +
-            // Minimal fallback styling — applies only when SOAR's stylesheets
-            // don't already cover these elements.
             "<style>body{font-family:system-ui,sans-serif;font-size:13px;margin:8px;background:#fff;color:#222}" +
             "table:not([class]){border-collapse:collapse}" +
             "table:not([class]) th,table:not([class]) td{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top}" +
-            "table:not([class]) th{background:#f3f3f3}</style></head><body>" + body + "</body></html>";
+            "table:not([class]) th{background:#f3f3f3}" +
+            "table td{background:#fff;color:#222}" +
+            "table tr:nth-child(even) td{background:#f7f7f9}" +
+            "</style></head><body>" + body + "</body></html>";
         }
         scope.$watch("html", render);
       },
