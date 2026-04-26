@@ -748,10 +748,16 @@
     function toggleFilterPalette() {
       $scope.filterPaletteOpen = !$scope.filterPaletteOpen;
       if ($scope.filterPaletteOpen) {
-        rebuildFilterGroups();
-        // Focus the search box once the panel is rendered.
+        // Read the query straight off the DOM input rather than the scope
+        // value. ng-model writes can land on a child scope (the original
+        // ng-change handler exists for the same reason), so on reopen
+        // $scope.filterPaletteQuery may not reflect the typed text. The
+        // input's .value is the source of truth.
         $timeout(function () {
           const el = document.getElementById("jinja-widget-filter-search");
+          const live = el ? el.value : ($scope.filterPaletteQuery || "");
+          $scope.filterPaletteQuery = live;
+          rebuildFilterGroups(live);
           if (el) el.focus();
         });
       }
@@ -760,7 +766,9 @@
     function closeFilterPalette() {
       if (!$scope.filterPaletteOpen) return;
       $scope.filterPaletteOpen = false;
-      $scope.filterPaletteQuery = "";
+      // Keep filterPaletteQuery as-is so reopening the palette restores the
+      // last search. toggleFilterPalette() calls rebuildFilterGroups() on
+      // open, which re-applies the persisted query against the full list.
     }
 
     // Inserts a filter at the template editor's cursor. If text is selected,
