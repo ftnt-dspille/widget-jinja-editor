@@ -30,7 +30,60 @@
   angular
     .module("cybersponse")
     .controller("jinjaEditorWidget114DevCtrl", jinjaEditorWidget114DevCtrl)
-    .directive("jinjaDraggable", jinjaDraggableDirective);
+    .directive("jinjaDraggable", jinjaDraggableDirective)
+    .directive("jinjaHtmlPreview", jinjaHtmlPreviewDirective);
+
+  // Renders an HTML string into a sandboxed iframe via srcdoc. The empty
+  // sandbox attribute disables scripts, plugins, form submission, popups,
+  // and same-origin access — the rendered output cannot reach the parent
+  // SOAR page in any way. Suitable for previewing untrusted template output.
+  function jinjaHtmlPreviewDirective() {
+    return {
+      restrict: "A",
+      scope: { html: "=jinjaHtmlPreview" },
+      template: '<iframe class="jinja-html-preview-frame" sandbox="" referrerpolicy="no-referrer"></iframe>',
+      link: function (scope, element) {
+        var iframe = element[0].querySelector("iframe");
+
+        // Mirror the parent page's <link rel="stylesheet"> hrefs into the
+        // preview so json2html tables (and anything using SOAR's design
+        // tokens) render the way they would in production. Stylesheets loaded
+        // via <link> work inside an empty-sandbox iframe — only scripts,
+        // forms, popups and same-origin access are blocked.
+        function collectStylesheetLinks() {
+          var links = document.querySelectorAll('link[rel="stylesheet"][href]');
+          var html = "";
+          for (var i = 0; i < links.length; i++) {
+            var href = links[i].getAttribute("href");
+            if (!href) continue;
+            // Resolve relative hrefs against the parent's base URL so the
+            // iframe (which has no document URL of its own) can fetch them.
+            var abs = new URL(href, document.baseURI).href;
+            html += '<link rel="stylesheet" href="' + abs.replace(/"/g, "&quot;") + '">';
+          }
+          return html;
+        }
+
+        function render(html) {
+          var trimmed = (html || "").trim();
+          // Wrap fragments so bare <tr>/<td> render with default table styles.
+          var needsWrap = /^<\s*(tr|td|th)\b/i.test(trimmed);
+          var body = needsWrap ? "<table>" + trimmed + "</table>" : trimmed;
+          iframe.srcdoc =
+            "<!doctype html><html><head><meta charset=\"utf-8\"><base href=\"" +
+            document.baseURI + "\">" +
+            collectStylesheetLinks() +
+            // Minimal fallback styling — applies only when SOAR's stylesheets
+            // don't already cover these elements.
+            "<style>body{font-family:system-ui,sans-serif;font-size:13px;margin:8px;background:#fff;color:#222}" +
+            "table:not([class]){border-collapse:collapse}" +
+            "table:not([class]) th,table:not([class]) td{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top}" +
+            "table:not([class]) th{background:#f3f3f3}</style></head><body>" + body + "</body></html>";
+        }
+        scope.$watch("html", render);
+      },
+    };
+  }
 
   function jinjaDraggableDirective() {
     return {
@@ -260,6 +313,40 @@
     $scope.loadingRecord = false;
     $scope.isErrorOutput = false;
     $scope.output = null;
+    // Output tab state. "auto" defers to detectOutputKind(); user clicks set
+    // an explicit kind. resolveOutputTab() reconciles the two.
+    $scope.outputTabPick = "auto";
+    $scope.detectedOutputKind = "raw";
+
+    // Pane layout preset. Stored per-browser so the choice survives reloads.
+    const LAYOUT_STORAGE_KEY = "jinjaEditorWidget.layoutPreset";
+    const VALID_LAYOUTS = ["equal", "outputFocus", "templateFocus", "stacked"];
+    $scope.layoutPreset = (function () {
+      try {
+        const saved = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+        if (saved && VALID_LAYOUTS.indexOf(saved) !== -1) return saved;
+      } catch (_) {}
+      return "equal";
+    })();
+    $scope.setLayoutPreset = function (preset) {
+      if (VALID_LAYOUTS.indexOf(preset) === -1) return;
+      $scope.layoutPreset = preset;
+      try { window.localStorage.setItem(LAYOUT_STORAGE_KEY, preset); } catch (_) {}
+    };
+    // Pure helper: map a preset to bootstrap col classes for {input, template, output}.
+    $scope.paneClasses = function () {
+      switch ($scope.layoutPreset) {
+        case "outputFocus":   return { input: "col-sm-3", template: "col-sm-3", output: "col-sm-6" };
+        case "templateFocus": return { input: "col-sm-3", template: "col-sm-6", output: "col-sm-3" };
+        case "stacked":       return { input: "col-sm-12", template: "col-sm-12", output: "col-sm-12" };
+        default:              return { input: "col-sm-4", template: "col-sm-4", output: "col-sm-4" };
+      }
+    };
+
+    // Output expand-modal state.
+    $scope.outputModalOpen = false;
+    $scope.openOutputModal = function () { $scope.outputModalOpen = true; };
+    $scope.closeOutputModal = function () { $scope.outputModalOpen = false; };
     $scope.inputJsonError = null;
     $scope.monacoReady = false;
 
@@ -464,6 +551,93 @@
         return null;
       }
     }
+
+    // --- Output view: tab detection + helpers -------------------------------
+
+    // Pure function: classify the rendered output into a tab kind.
+    // - Arrays / dicts (anything that's a JS object after parse) -> "json"
+    // - Strings that look like an HTML document or fragment       -> "html"
+    // - Everything else                                            -> "raw"
+    function detectOutputKind(output) {
+      if (output == null) return "raw";
+      if (typeof output === "object") return "json";
+      if (typeof output !== "string") return "raw";
+      const trimmed = output.trim();
+      if (!trimmed) return "raw";
+      // JSON-string detection: starts with [ or { AND parses cleanly.
+      if (trimmed[0] === "{" || trimmed[0] === "[") {
+        try { JSON.parse(trimmed); return "json"; } catch (_) { /* fall through */ }
+      }
+      // HTML detection: starts with a tag, or contains a recognizable HTML
+      // element somewhere in the first 400 chars (covers fragments emitted
+      // by json2html and friends).
+      const head = trimmed.slice(0, 400).toLowerCase();
+      if (trimmed[0] === "<" && /<\/?[a-z][\s\S]*>/i.test(trimmed)) return "html";
+      if (/<(table|html|div|p|ul|ol|tr|td|h[1-6]|span|pre|code)\b/.test(head)) return "html";
+      return "raw";
+    }
+
+    // Resolve the active tab: explicit user pick wins, else use detection.
+    $scope.resolveOutputTab = function () {
+      return $scope.outputTabPick === "auto"
+        ? $scope.detectedOutputKind
+        : $scope.outputTabPick;
+    };
+
+    $scope.setOutputTab = function (kind) { $scope.outputTabPick = kind; };
+
+    // String form of the output for the JSON Monaco pane. For object outputs
+    // we stringify; for strings that already parse as JSON we re-pretty them.
+    $scope.outputJsonText = "";
+    function refreshOutputJsonText() {
+      const o = $scope.output;
+      if (o == null) { $scope.outputJsonText = ""; return; }
+      if (typeof o === "object") {
+        try { $scope.outputJsonText = JSON.stringify(o, null, 2); } catch (_) { $scope.outputJsonText = String(o); }
+        return;
+      }
+      if (typeof o === "string") {
+        const t = o.trim();
+        if (t && (t[0] === "{" || t[0] === "[")) {
+          try { $scope.outputJsonText = JSON.stringify(JSON.parse(t), null, 2); return; } catch (_) {}
+        }
+        $scope.outputJsonText = o;
+        return;
+      }
+      $scope.outputJsonText = String(o);
+    }
+
+    // Recompute detection + JSON text whenever the output changes.
+    $scope.$watch("output", function () {
+      $scope.detectedOutputKind = detectOutputKind($scope.output);
+      $scope.outputTabPick = "auto"; // reset user pick so detection drives
+      refreshOutputJsonText();
+    });
+
+    $scope.outputJsonEditorConfig = {
+      language: "json",
+      theme: "jinjaTheme",
+      automaticLayout: true,
+      readOnly: true,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      fontSize: 12,
+      tabSize: 2,
+      lineNumbers: "off",
+    };
+    // Separate config object for the modal — the directive mutates the config
+    // in-place so the inline pane and the modal pane each need their own.
+    $scope.outputJsonModalEditorConfig = {
+      language: "json",
+      theme: "jinjaTheme",
+      automaticLayout: true,
+      readOnly: true,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      fontSize: 13,
+      tabSize: 2,
+      lineNumbers: "on",
+    };
 
     // --- Filter library palette ---------------------------------------------
 
@@ -1054,7 +1228,13 @@
           const tagMatch = content.match(/^-?\s*(\w+)/);
           const tagName = tagMatch ? tagMatch[1] : null;
           if (tagName && openingTags.has(tagName)) {
-            blockStack.push({ tag: tagName, line: lineNum });
+            // `{% set foo = bar %}` is a single-line assignment — only the
+            // block form `{% set foo %}…{% endset %}` (no `=`) needs endset.
+            if (tagName === "set" && /=/.test(content)) {
+              // single-line set, not a block opener
+            } else {
+              blockStack.push({ tag: tagName, line: lineNum });
+            }
           } else if (tagName && closingTagMap[tagName]) {
             if (blockStack.length === 0 || blockStack[blockStack.length - 1].tag !== closingTagMap[tagName]) {
               findings.push({
@@ -1383,10 +1563,13 @@
 
 
     function onPaletteKey(event) {
-      if (event.key === "Escape" && $scope.filterPaletteOpen) {
-        $scope.$applyAsync(function () {
-          closeFilterPalette();
-        });
+      if (event.key !== "Escape") return;
+      if ($scope.outputModalOpen) {
+        $scope.$applyAsync(function () { $scope.outputModalOpen = false; });
+        return;
+      }
+      if ($scope.filterPaletteOpen) {
+        $scope.$applyAsync(function () { closeFilterPalette(); });
       }
     }
     document.addEventListener("keydown", onPaletteKey);

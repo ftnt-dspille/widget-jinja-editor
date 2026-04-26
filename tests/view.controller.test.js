@@ -1383,6 +1383,154 @@ describe("error markers", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Layout preset + output expand modal
+// ---------------------------------------------------------------------------
+describe("layout preset", () => {
+  beforeEach(() => { try { window.localStorage.clear(); } catch (_) {} });
+
+  test("default layout is `equal` and maps to col-sm-4 across all panes", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    expect(scope.layoutPreset).toBe("equal");
+    expect(scope.paneClasses()).toEqual({ input: "col-sm-4", template: "col-sm-4", output: "col-sm-4" });
+  });
+
+  test("setLayoutPreset('outputFocus') gives output the wider column", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    scope.setLayoutPreset("outputFocus");
+    const c = scope.paneClasses();
+    expect(c.output).toBe("col-sm-6");
+    expect(c.input).toBe("col-sm-3");
+    expect(c.template).toBe("col-sm-3");
+  });
+
+  test("setLayoutPreset persists to localStorage", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    scope.setLayoutPreset("stacked");
+    expect(window.localStorage.getItem("jinjaEditorWidget.layoutPreset")).toBe("stacked");
+  });
+
+  test("invalid preset is ignored", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    scope.setLayoutPreset("bogus");
+    expect(scope.layoutPreset).toBe("equal");
+  });
+});
+
+describe("output expand modal", () => {
+  test("openOutputModal / closeOutputModal toggle the flag", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    expect(scope.outputModalOpen).toBe(false);
+    scope.openOutputModal();
+    expect(scope.outputModalOpen).toBe(true);
+    scope.closeOutputModal();
+    expect(scope.outputModalOpen).toBe(false);
+  });
+
+  test("Escape key closes the modal when open", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    scope.openOutputModal();
+    $rootScope.$apply();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    $rootScope.$apply();
+    expect(scope.outputModalOpen).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Output tab detection (detectOutputKind via $scope side effects)
+// ---------------------------------------------------------------------------
+describe("output tab detection", () => {
+  function setOutputAndDigest(scope, value) {
+    scope.$apply(() => { scope.output = value; });
+  }
+
+  test("object output -> json tab", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, { name: "Ada" });
+    expect(scope.detectedOutputKind).toBe("json");
+    expect(scope.resolveOutputTab()).toBe("json");
+  });
+
+  test("array output -> json tab", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, [1, 2, 3]);
+    expect(scope.detectedOutputKind).toBe("json");
+  });
+
+  test("JSON-shaped string output -> json tab and pretty-printed in outputJsonText", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, '[{"a":1},{"a":2}]');
+    expect(scope.detectedOutputKind).toBe("json");
+    expect(scope.outputJsonText).toContain("\n");
+    expect(scope.outputJsonText).toContain('"a": 1');
+  });
+
+  test("HTML string output -> html tab", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, '<table class="cs-data-table"><tr><td>a</td></tr></table>');
+    expect(scope.detectedOutputKind).toBe("html");
+  });
+
+  test("HTML fragment output (bare <tr>) -> html tab", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, "<tr><td>a</td><td>b</td></tr>");
+    expect(scope.detectedOutputKind).toBe("html");
+  });
+
+  test("plain text -> raw tab", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, "Hello, Ada");
+    expect(scope.detectedOutputKind).toBe("raw");
+  });
+
+  test("explicit user pick overrides auto detection", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, { name: "Ada" });
+    expect(scope.resolveOutputTab()).toBe("json");
+    scope.setOutputTab("raw");
+    expect(scope.resolveOutputTab()).toBe("raw");
+  });
+
+  test("new output resets the tab pick to auto", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    setOutputAndDigest(scope, { name: "Ada" });
+    scope.setOutputTab("raw");
+    expect(scope.outputTabPick).toBe("raw");
+    setOutputAndDigest(scope, "<table><tr><td>x</td></tr></table>");
+    expect(scope.outputTabPick).toBe("auto");
+    expect(scope.resolveOutputTab()).toBe("html");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Live scan — debounced scan that runs on edits/input changes without Render
 // ---------------------------------------------------------------------------
 describe("live scan (no prior Render)", () => {
@@ -1567,6 +1715,29 @@ describe("scanTemplate()", () => {
   test("case 3 — flags if block never closed with endif", () => {
     const msgs = errorMessages(scanViaSubmit("{% if condition %}\n  hello", undefined, ["upper"]));
     expect(msgs.some((m) => /never closed|endif/i.test(m))).toBe(true);
+  });
+
+  // Single-line `{% set foo = bar %}` is NOT a block opener — should not
+  // trip the "never closed with endset" finding.
+  test("single-line `{% set foo = bar %}` is not flagged as missing endset", () => {
+    const calls = scanViaSubmit(
+      "{% set score = vars.input.records[0].risk_score %}",
+      JSON.stringify({ vars: { input: { records: [{ risk_score: 5 }] } } }),
+      ["upper"]
+    );
+    const msgs = calls.flatMap((c) => c[2].map((m) => m.message));
+    expect(msgs.some((m) => /endset|never closed/i.test(m))).toBe(false);
+  });
+
+  test("block-form `{% set foo %}…{% endset %}` still validated correctly", () => {
+    // Block form (no `=`) without a matching endset SHOULD be flagged.
+    const calls = scanViaSubmit(
+      "{% set summary %}\nhello\n",
+      JSON.stringify({}),
+      ["upper"]
+    );
+    const msgs = calls.flatMap((c) => c[2].map((m) => m.message));
+    expect(msgs.some((m) => /endset|never closed/i.test(m))).toBe(true);
   });
 
   // Missing filter name after a pipe

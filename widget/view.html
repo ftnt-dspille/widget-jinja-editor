@@ -37,6 +37,15 @@
         <i class="fa fa-spinner fa-spin margin-right-sm" data-ng-if="loadingRecord"></i>
         Load current record
       </button>
+      <select class="form-control input-sm jinja-layout-picker margin-right-sm"
+              data-ng-model="layoutPreset"
+              data-ng-change="setLayoutPreset(layoutPreset)"
+              title="Pane layout">
+        <option value="equal">Layout: equal</option>
+        <option value="outputFocus">Layout: output focus</option>
+        <option value="templateFocus">Layout: template focus</option>
+        <option value="stacked">Layout: stacked</option>
+      </select>
       <button type="button"
               class="btn btn-default btn-sm margin-right-sm"
               data-ng-click="copyTemplate()">
@@ -53,7 +62,7 @@
 
   <div class="jinja-editor-widget-body">
     <div class="row padding-left-lg padding-right-lg padding-bottom-lg">
-      <div class="col-sm-4 jinja-pane">
+      <div class="jinja-pane" data-ng-class="paneClasses().input">
         <div class="display-flex-space-between margin-top-sm">
           <label class="control-label font-size-16 margin-bottom-0">Input</label>
           <div>
@@ -89,7 +98,7 @@
         </div>
       </div>
 
-      <div class="col-sm-4 jinja-pane position-relative">
+      <div class="jinja-pane position-relative" data-ng-class="paneClasses().template">
         <div class="display-flex-space-between margin-top-sm jinja-template-header">
           <label class="control-label font-size-16 margin-bottom-0">
             Jinja template <span class="text-danger">*</span>
@@ -192,26 +201,103 @@
         </div>
       </div>
 
-      <div class="col-sm-4 jinja-pane">
-        <label class="control-label font-size-16 margin-top-sm margin-bottom-0">Output</label>
+      <div class="jinja-pane" data-ng-class="paneClasses().output">
+        <div class="display-flex-space-between margin-top-sm">
+          <label class="control-label font-size-16 margin-bottom-0">Output</label>
+          <div class="display-flex">
+            <ul class="nav nav-pills jinja-output-tabs">
+              <li data-ng-class="{ active: resolveOutputTab() === 'raw' }">
+                <a href="" data-ng-click="setOutputTab('raw')">Raw</a>
+              </li>
+              <li data-ng-class="{ active: resolveOutputTab() === 'json' }">
+                <a href="" data-ng-click="setOutputTab('json')">JSON</a>
+              </li>
+              <li data-ng-class="{ active: resolveOutputTab() === 'html' }">
+                <a href="" data-ng-click="setOutputTab('html')">HTML</a>
+              </li>
+            </ul>
+            <button type="button"
+                    class="btn btn-default btn-xs margin-left-sm jinja-output-expand"
+                    data-ng-click="openOutputModal()"
+                    data-ng-disabled="output == null"
+                    title="Open output in a larger view">
+              <i class="fa fa-expand"></i>
+            </button>
+          </div>
+        </div>
         <div class="font-size-12 muted-65 margin-bottom-sm">
           Result of <code>POST api/wf/api/jinja-editor/</code>.
+          <span data-ng-if="outputTabPick === 'auto' && output != null"> Auto-selected: <strong>{{ detectedOutputKind }}</strong>.</span>
         </div>
         <div class="position-relative output-area">
           <i class="fa fa-spinner fa-spin output-loader position-absolute"
              data-ng-if="processing"></i>
-          <pre class="jinja-widget-json-view"
-               data-ng-class="{'jinja-output--light': !isDark}"
-               data-ng-if="angular.isObject(output)"
-               data-ng-bind="output | json"></pre>
+
+          <!-- Raw tab: textarea (always-renderable fallback) -->
           <textarea id="jinja-widget-output"
                     class="form-control jinja-code-area"
                     data-ng-class="{'has-error-border': isErrorOutput, 'jinja-output--light': !isDark}"
                     data-ng-model="output"
                     readonly="readonly"
                     rows="12"
-                    data-ng-if="!angular.isObject(output)"></textarea>
+                    data-ng-if="resolveOutputTab() === 'raw'"></textarea>
+
+          <!-- JSON tab: read-only Monaco editor for arrays/dicts -->
+          <div id="jinja-widget-output-json"
+               class="monaco-pane"
+               data-ng-if="resolveOutputTab() === 'json' && monacoReady"
+               data-monaco-editor
+               data-editor-config="outputJsonEditorConfig"
+               data-editor-content="outputJsonText"></div>
+
+          <!-- HTML tab: sandboxed iframe preview -->
+          <div class="jinja-html-preview"
+               data-ng-if="resolveOutputTab() === 'html'"
+               data-jinja-html-preview="output"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Output expand modal -->
+  <div class="jinja-output-modal-backdrop"
+       data-ng-if="outputModalOpen"
+       data-ng-click="closeOutputModal()">
+    <div class="jinja-output-modal" data-ng-click="$event.stopPropagation()">
+      <div class="jinja-output-modal-header">
+        <strong>Output</strong>
+        <ul class="nav nav-pills jinja-output-tabs margin-left-md">
+          <li data-ng-class="{ active: resolveOutputTab() === 'raw' }">
+            <a href="" data-ng-click="setOutputTab('raw')">Raw</a>
+          </li>
+          <li data-ng-class="{ active: resolveOutputTab() === 'json' }">
+            <a href="" data-ng-click="setOutputTab('json')">JSON</a>
+          </li>
+          <li data-ng-class="{ active: resolveOutputTab() === 'html' }">
+            <a href="" data-ng-click="setOutputTab('html')">HTML</a>
+          </li>
+        </ul>
+        <button type="button"
+                class="btn btn-link btn-sm jinja-output-modal-close"
+                data-ng-click="closeOutputModal()"
+                title="Close (Esc)">
+          <i class="fa fa-times"></i>
+        </button>
+      </div>
+      <div class="jinja-output-modal-body">
+        <textarea class="form-control jinja-code-area jinja-output-modal-textarea"
+                  data-ng-class="{'has-error-border': isErrorOutput, 'jinja-output--light': !isDark}"
+                  data-ng-model="output"
+                  readonly="readonly"
+                  data-ng-if="resolveOutputTab() === 'raw'"></textarea>
+        <div class="monaco-pane jinja-output-modal-monaco"
+             data-ng-if="resolveOutputTab() === 'json' && monacoReady"
+             data-monaco-editor
+             data-editor-config="outputJsonModalEditorConfig"
+             data-editor-content="outputJsonText"></div>
+        <div class="jinja-html-preview jinja-output-modal-html"
+             data-ng-if="resolveOutputTab() === 'html'"
+             data-jinja-html-preview="output"></div>
       </div>
     </div>
   </div>
