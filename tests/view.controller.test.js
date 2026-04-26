@@ -1071,11 +1071,11 @@ describe("error markers", () => {
 
     const mockModel = {
       getLanguageId: jest.fn(() => "jinja2"),
-      getLineContent: jest.fn(() => "{{ bad | filter }}"),
+      getLineContent: jest.fn(() => "{{ bad | upper }}"),
       getValueInRange: jest.fn(() => ""),
     };
     const mockEditor = {
-      getValue: jest.fn(() => "{{ bad | filter }}"),
+      getValue: jest.fn(() => "{{ bad | upper }}"),
       setValue: jest.fn(),
       getModel: jest.fn(() => mockModel),
       getPosition: jest.fn(() => ({ lineNumber: 1, column: 1 })),
@@ -1122,8 +1122,13 @@ describe("error markers", () => {
     d.reject({ statusText: "Bad Request", data: { message: "unexpected end of template at line 1" } });
     $rootScope.$apply();
 
-    const markers = global.monaco.editor.setModelMarkers.mock.calls[0][2];
-    expect(markers[0].message).toMatch(/unexpected end/i);
+    // Path warnings may be placed first; find the call containing an error-severity marker.
+    const errorCall = global.monaco.editor.setModelMarkers.mock.calls.find(
+      (c) => c[2].some((m) => m.severity === 8)
+    );
+    expect(errorCall).toBeDefined();
+    const errorMarker = errorCall[2].find((m) => m.severity === 8);
+    expect(errorMarker.message).toMatch(/unexpected end/i);
   });
 
   test("no marker is set when the error has no line number and no unclosed tag", () => {
@@ -1139,9 +1144,9 @@ describe("error markers", () => {
     d.reject({ statusText: "Internal Server Error", data: {} });
     $rootScope.$apply();
 
-    // setModelMarkers should NOT have been called for an error marker.
+    // setModelMarkers should NOT have been called with any error-severity (8) marker.
     const errorCalls = global.monaco.editor.setModelMarkers.mock.calls.filter(
-      (c) => c[2].length > 0
+      (c) => c[2].some((m) => m.severity === 8)
     );
     expect(errorCalls).toHaveLength(0);
   });
@@ -1320,5 +1325,310 @@ describe("error markers", () => {
       "jinja-render",
       []
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanTemplate() — structural linting (cases 1–4, 6, 9)
+// ---------------------------------------------------------------------------
+describe("scanTemplate()", () => {
+  // scanTemplate is private. We reach it via submit() → reject with no line
+  // number → setTemplateErrorMarker runs scanTemplate as its fallback.
+
+  // Helper: wire an editor with the given template, submit, reject with a
+  // generic (no-line-number) error, and return all setModelMarkers calls.
+  function scanViaSubmit(templateText, inputJson, knownFilterNames) {
+    const origSigs = global.JinjaEditorWidget.filterSignatures;
+    if (knownFilterNames) {
+      global.JinjaEditorWidget.filterSignatures = {};
+      for (const n of knownFilterNames) {
+        global.JinjaEditorWidget.filterSignatures[n] = {
+          category: "Test", documentation: "", parameters: [], returnValue: { type: "any" },
+        };
+      }
+    }
+
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    const { scope } = createCtrl({ services: { dynamicValueService: { evaluateJinja } } });
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const lines = templateText.split("\n");
+    const model = {
+      getLanguageId: jest.fn(() => "jinja2"),
+      getLineContent: jest.fn((n) => lines[n - 1] || ""),
+      getValueInRange: jest.fn(() => ""),
+    };
+    const editor = {
+      getValue: jest.fn(() => templateText),
+      setValue: jest.fn(),
+      getModel: jest.fn(() => model),
+      getPosition: jest.fn(() => ({ lineNumber: 1, column: 1 })),
+      getSelection: jest.fn(() => ({})),
+      executeEdits: jest.fn(),
+      getContribution: jest.fn(() => null),
+      focus: jest.fn(),
+      onDidChangeModelContent: jest.fn(() => ({ dispose: jest.fn() })),
+    };
+    scope.onTemplateEditorReady(editor);
+    if (inputJson !== undefined) scope.inputJsonText = inputJson;
+
+    global.monaco.editor.setModelMarkers.mockClear();
+    scope.submit();
+    // Generic error with no line number → setTemplateErrorMarker runs scanTemplate
+    d.reject({ data: { message: "unexpected end of template" } });
+    $rootScope.$apply();
+
+    global.JinjaEditorWidget.filterSignatures = origSigs;
+    return global.monaco.editor.setModelMarkers.mock.calls;
+  }
+
+  function errorMessages(calls) {
+    return calls
+      .filter((c) => c[2].some((m) => m.severity === 8))
+      .flatMap((c) => c[2].filter((m) => m.severity === 8).map((m) => m.message));
+  }
+
+  beforeEach(() => { global.monaco.editor.setModelMarkers.mockClear(); });
+
+  // Case 1: unclosed {{ expression
+  test("case 1 — flags unclosed {{ expression", () => {
+    const msgs = errorMessages(scanViaSubmit(
+      "Hello {{ vars.input.records[0].name",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } })
+    ));
+    expect(msgs.some((m) => /unclosed expression/i.test(m))).toBe(true);
+  });
+
+  // Case 2: unclosed {% block tag
+  test("case 2 — flags unclosed {% block tag", () => {
+    const msgs = errorMessages(scanViaSubmit(
+      "{% if condition\n  hello\n{% endif %}",
+      undefined,
+      ["upper"]
+    ));
+    expect(msgs.some((m) => /unclosed block tag/i.test(m))).toBe(true);
+  });
+
+  // Case 3: orphan closing tag
+  test("case 3 — flags orphan endfor with no matching for", () => {
+    const msgs = errorMessages(scanViaSubmit("{{ hello }}\n{% endfor %}", undefined, ["upper"]));
+    expect(msgs.some((m) => /unexpected.*endfor|no matching/i.test(m))).toBe(true);
+  });
+
+  // Case 3: unclosed opening tag
+  test("case 3 — flags if block never closed with endif", () => {
+    const msgs = errorMessages(scanViaSubmit("{% if condition %}\n  hello", undefined, ["upper"]));
+    expect(msgs.some((m) => /never closed|endif/i.test(m))).toBe(true);
+  });
+
+  // Case 6: empty vars.input.records
+  test("case 6 — flags when vars.input.records is empty in test input", () => {
+    const msgs = errorMessages(scanViaSubmit(
+      "{% for r in vars.input.records %}{{ r.name }}{% endfor %}",
+      JSON.stringify({ vars: { input: { records: [] } } }),
+      ["upper"]
+    ));
+    expect(msgs.some((m) => /vars\.input\.records is empty/i.test(m))).toBe(true);
+  });
+
+  // Case 9: unknown filter name
+  test("case 9 — flags unknown filter name", () => {
+    const msgs = errorMessages(scanViaSubmit(
+      "{{ vars.input.records[0].name | typofilter }}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } }),
+      ["upper", "lower", "default"]
+    ));
+    expect(msgs.some((m) => /unknown filter.*typofilter/i.test(m))).toBe(true);
+  });
+
+  // No false positives
+  test("no error markers for a well-formed template", () => {
+    const calls = scanViaSubmit(
+      "{% for r in vars.input.records %}{{ r.name | upper }}{% endfor %}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } }),
+      ["upper", "lower", "default"]
+    );
+    const errorCalls = calls.filter((c) => c[2].some((m) => m.severity === 8));
+    expect(errorCalls).toHaveLength(0);
+  });
+
+  // Re-scan keeps marker while broken, clears when fixed
+  test("re-scan keeps marker while tag is still unclosed, clears when fixed", () => {
+    jest.useFakeTimers();
+    let currentTemplate = "Hello {{ vars.input.records[0].name";
+    const lines = () => currentTemplate.split("\n");
+    const model = {
+      getLanguageId: jest.fn(() => "jinja2"),
+      getLineContent: jest.fn((n) => lines()[n - 1] || ""),
+      getValueInRange: jest.fn(() => ""),
+    };
+    let changeHandler;
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    const { scope } = createCtrl({ services: { dynamicValueService: { evaluateJinja } } });
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    const editor = {
+      getValue: jest.fn(() => currentTemplate),
+      setValue: jest.fn(),
+      getModel: jest.fn(() => model),
+      getPosition: jest.fn(() => ({ lineNumber: 1, column: 1 })),
+      getSelection: jest.fn(() => ({})),
+      executeEdits: jest.fn(),
+      getContribution: jest.fn(() => null),
+      focus: jest.fn(),
+      onDidChangeModelContent: jest.fn((fn) => { changeHandler = fn; return { dispose: jest.fn() }; }),
+    };
+    scope.onTemplateEditorReady(editor);
+    scope.inputJsonText = JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } });
+
+    scope.submit();
+    d.reject({ data: { message: "unexpected end of template" } });
+    $rootScope.$apply();
+
+    // Still broken — re-scan should keep a marker
+    global.monaco.editor.setModelMarkers.mockClear();
+    changeHandler();
+    jest.runAllTimers();
+    expect(global.monaco.editor.setModelMarkers.mock.calls.some((c) => c[2].length > 0)).toBe(true);
+
+    // Fix the template — re-scan should clear
+    currentTemplate = "Hello {{ vars.input.records[0].name }}";
+    global.monaco.editor.setModelMarkers.mockClear();
+    changeHandler();
+    jest.runAllTimers();
+    expect(global.monaco.editor.setModelMarkers).toHaveBeenCalledWith(model, "jinja-render", []);
+
+    jest.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkInputPaths() — field path validation (case 5)
+// ---------------------------------------------------------------------------
+describe("checkInputPaths() — field path warnings", () => {
+  beforeEach(() => { global.monaco.editor.setModelMarkers.mockClear(); });
+
+  function submitAndGetWarnings(scope, templateText, inputJson) {
+    scope.inputJsonText = inputJson;
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    let injectedDvs;
+    ngInject((_dynamicValueService_) => { injectedDvs = _dynamicValueService_; });
+    injectedDvs.evaluateJinja = evaluateJinja;
+
+    const lines = templateText.split("\n");
+    const model = {
+      getLanguageId: jest.fn(() => "jinja2"),
+      getLineContent: jest.fn((n) => lines[n - 1] || ""),
+      getValueInRange: jest.fn(() => ""),
+    };
+    const editor = {
+      getValue: jest.fn(() => templateText),
+      setValue: jest.fn(),
+      getModel: jest.fn(() => model),
+      getPosition: jest.fn(() => ({ lineNumber: 1, column: 1 })),
+      getSelection: jest.fn(() => ({})),
+      executeEdits: jest.fn(),
+      getContribution: jest.fn(() => null),
+      focus: jest.fn(),
+      onDidChangeModelContent: jest.fn(() => ({ dispose: jest.fn() })),
+    };
+    scope.onTemplateEditorReady(editor);
+    scope.submit();
+
+    return global.monaco.editor.setModelMarkers.mock.calls
+      .filter((c) => c[2].some((m) => m.severity === 4))
+      .flatMap((c) => c[2].filter((m) => m.severity === 4));
+  }
+
+  test("places warning when template references a field not in input JSON", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{{ vars.input.records[0].typoField }}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } })
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0].message).toMatch(/typoField.*not found/i);
+  });
+
+  test("no warning when all paths resolve correctly", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{{ vars.input.records[0].name }}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } })
+    );
+    expect(warnings).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// translateJinjaError() — human-readable error messages (cases 7, 8)
+// ---------------------------------------------------------------------------
+describe("translateJinjaError() via submit error output", () => {
+  function submitAndGetOutput(errorMsg) {
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    const { scope } = createCtrl({ services: { dynamicValueService: { evaluateJinja } } });
+    scope.templateText = "{{ x }}";
+    scope.inputJsonText = "{}";
+    scope.submit();
+    d.reject({ statusText: "Bad Request", data: { message: errorMsg } });
+    $rootScope.$apply();
+    return scope.output;
+  }
+
+  test("list index out of range → records-guard suggestion", () => {
+    const out = submitAndGetOutput("list index out of range");
+    expect(out).toMatch(/vars\.input\.records may be empty/i);
+    expect(out).toMatch(/original:/i);
+  });
+
+  test("has no attribute (non-list) → field-not-found message", () => {
+    const out = submitAndGetOutput("'str' object has no attribute 'name'");
+    expect(out).toMatch(/field was not found/i);
+    expect(out).toMatch(/original:/i);
+  });
+
+  test("no filter named → filter spelling message", () => {
+    const out = submitAndGetOutput("no filter named 'typofilter'");
+    expect(out).toMatch(/unknown filter name/i);
+    expect(out).toMatch(/original:/i);
+  });
+
+  test("expected token → syntax error message", () => {
+    const out = submitAndGetOutput("expected token '}'");
+    expect(out).toMatch(/syntax error in template/i);
+    expect(out).toMatch(/original:/i);
+  });
+
+  test("unexpected → syntax error message", () => {
+    const out = submitAndGetOutput("unexpected end of template");
+    expect(out).toMatch(/syntax error in template/i);
+  });
+
+  test("division by zero → division message", () => {
+    const out = submitAndGetOutput("integer division or modulo by zero");
+    expect(out).toMatch(/division by zero/i);
+  });
+
+  test("cannot convert → type error message", () => {
+    const out = submitAndGetOutput("cannot convert 'int' to string");
+    expect(out).toMatch(/type error/i);
+  });
+
+  test("unknown error passes through unchanged", () => {
+    const out = submitAndGetOutput("some completely unknown server error");
+    expect(out).toContain("some completely unknown server error");
   });
 });

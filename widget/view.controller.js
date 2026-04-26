@@ -19,7 +19,7 @@
   })();
 
   // Extract the X.Y.Z trailing on the widget folder name (e.g.
-  // "jinjaEditorWidget-1.0.4/" -> "1.0.4"). Works in both the dev harness
+  // "jinjaEditorWidget-X.Y.Z/" -> "X.Y.Z"). Works in both the dev harness
   // and a live SOAR install because both serve the widget under a
   // versioned folder. Empty if the match fails — the view hides the badge.
   const WIDGET_VERSION = (function () {
@@ -982,7 +982,7 @@
       if (lower.match(/expected token|unexpected|end of statement block|end of template/)) {
         return "Syntax error in template — check for unclosed {{ }}, {% %}, or mismatched tags (original: " + msg + ")";
       }
-      if (lower.match(/division by zero/)) {
+      if (lower.match(/division by zero|modulo by zero/)) {
         return "Division by zero — the divisor evaluated to 0 (original: " + msg + ")";
       }
       if (lower.match(/filter.*requires|takes.*argument|takes no arguments/)) {
@@ -1046,33 +1046,35 @@
             }
           }
         }
-        // Case 2: Unclosed {% %}
-        const blockOpenIdx = line.indexOf("{%");
-        if (blockOpenIdx !== -1) {
-          const blockCloseIdx = line.indexOf("%}", blockOpenIdx);
+        // Cases 2 & 3: scan ALL {% %} blocks on this line
+        let searchFrom = 0;
+        while (true) {
+          const blockOpenIdx = line.indexOf("{%", searchFrom);
+          if (blockOpenIdx === -1) break;
+          const blockCloseIdx = line.indexOf("%}", blockOpenIdx + 2);
           if (blockCloseIdx === -1) {
             findings.push({
               line: lineNum,
               message: "Unclosed block tag — did you mean {% ... %}?",
             });
-          } else {
-            // Case 3: Block tag nesting
-            const content = line.slice(blockOpenIdx + 2, blockCloseIdx).trim();
-            const tagMatch = content.match(/^(\w+)/);
-            const tagName = tagMatch ? tagMatch[1] : null;
-            if (tagName && openingTags.has(tagName)) {
-              blockStack.push({ tag: tagName, line: lineNum });
-            } else if (tagName && closingTagMap[tagName]) {
-              if (blockStack.length === 0 || blockStack[blockStack.length - 1].tag !== closingTagMap[tagName]) {
-                findings.push({
-                  line: lineNum,
-                  message: "Unexpected {{% end" + closingTagMap[tagName] + " %}} — no matching {{% " + closingTagMap[tagName] + " %}} found",
-                });
-              } else {
-                blockStack.pop();
-              }
+            break; // rest of line is inside the unclosed tag
+          }
+          const content = line.slice(blockOpenIdx + 2, blockCloseIdx).trim();
+          const tagMatch = content.match(/^-?\s*(\w+)/);
+          const tagName = tagMatch ? tagMatch[1] : null;
+          if (tagName && openingTags.has(tagName)) {
+            blockStack.push({ tag: tagName, line: lineNum });
+          } else if (tagName && closingTagMap[tagName]) {
+            if (blockStack.length === 0 || blockStack[blockStack.length - 1].tag !== closingTagMap[tagName]) {
+              findings.push({
+                line: lineNum,
+                message: "Unexpected {{% end" + closingTagMap[tagName] + " %}} — no matching {{% " + closingTagMap[tagName] + " %}} found",
+              });
+            } else {
+              blockStack.pop();
             }
           }
+          searchFrom = blockCloseIdx + 2;
         }
         // Case 5: Track vars.input.records first reference
         if (recordsCheckLine === null && line.match(/vars\.input\.records/) && inputData) {
@@ -1108,6 +1110,7 @@
     }
 
     function applyMarkers(findings) {
+      if (!templateEditor || !window.monaco) return;
       const model = templateEditor.getModel();
       if (!model) return;
       const markers = [];
@@ -1115,7 +1118,7 @@
         const lineNumber = finding.line;
         const msg = finding.message;
         const severity = finding.severity || (window.monaco.MarkerSeverity ? window.monaco.MarkerSeverity.Error : 8);
-        const lineContent = model.getLineContent(lineNumber) || "";
+        const lineContent = (model.getLineContent ? model.getLineContent(lineNumber) : null) || "";
         const startCol = (lineContent.search(/\S/) + 1) || 1;
         const endCol = lineContent.length + 1;
         markers.push({
@@ -1144,11 +1147,20 @@
         return;
       }
 
-      const scannedLine = findUnclosedTagLine(templateEditor.getValue());
-      if (!scannedLine) {
-        // No server line and no unclosed tag found - don't mark anything
+      // No server-provided line — run the full scan to surface structural issues
+      // (mismatched tags, unknown filters, empty records, etc.).
+      const inputData = parseInput();
+      const knownFilters = new Set(Object.keys(getFilterSignatures()));
+      const scanFindings = scanTemplate(templateEditor.getValue(), inputData, knownFilters);
+      if (scanFindings.length > 0) {
+        markerIsFromScan = true;
+        applyMarkers(scanFindings);
         return;
       }
+
+      // Last resort: simple unclosed-tag line scan.
+      const scannedLine = findUnclosedTagLine(templateEditor.getValue());
+      if (!scannedLine) return;
 
       markerIsFromScan = true;
       applyMarkerAtLine(scannedLine, msg);
