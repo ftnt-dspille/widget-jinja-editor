@@ -5,13 +5,6 @@
   "description": "FortiSOAR Jinja Editor widget",
   "license": "MIT",
   "scripts": {
-    "test": "jest",
     "package": "node scripts/package.js"
-  },
-  "devDependencies": {
-    "angular": "1.8",
-    "angular-mocks": "1.8",
-    "jest": "^29.7.0",
-    "jest-environment-jsdom": "^29.7.0"
   }
 }
