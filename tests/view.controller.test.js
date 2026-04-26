@@ -127,10 +127,10 @@ global.JinjaEditorWidget = {
 angular.module("cybersponse", []); // eslint-disable-line no-undef
 
 // Side-effect require: executes the controller IIFE, registering
-// jinjaEditorWidget113DevCtrl against the cybersponse module.
+// jinjaEditorWidget114DevCtrl against the cybersponse module.
 require("../widget/view.controller.js");
 
-const CTRL_NAME = "jinjaEditorWidget113DevCtrl";
+const CTRL_NAME = "jinjaEditorWidget114DevCtrl";
 
 // Capture angular after both require('angular') and require('angular-mocks')
 // have run. angular-mocks adds .mock to window.angular in the same tick.

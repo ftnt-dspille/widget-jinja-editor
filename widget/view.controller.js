@@ -27,16 +27,9 @@
     return m ? m[1] : "";
   })();
 
-  console.warn("[JinjaWidget] view.controller.js evaluated", {
-    WIDGET_BASE: WIDGET_BASE,
-    WIDGET_VERSION: WIDGET_VERSION,
-    origin: location.origin,
-    href: location.href,
-  });
-
   angular
     .module("cybersponse")
-    .controller("jinjaEditorWidget113DevCtrl", jinjaEditorWidget113DevCtrl)
+    .controller("jinjaEditorWidget114DevCtrl", jinjaEditorWidget114DevCtrl)
     .directive("jinjaDraggable", jinjaDraggableDirective);
 
   function jinjaDraggableDirective() {
@@ -94,7 +87,7 @@
     };
   }
 
-  jinjaEditorWidget113DevCtrl.$inject = [
+  jinjaEditorWidget114DevCtrl.$inject = [
     "$scope",
     "$rootScope",
     "$state",
@@ -221,44 +214,21 @@
       preloadCheck.hasSnippets &&
       preloadCheck.hasTemplateExamples
     ) {
-      console.warn("[JinjaWidget] ensureWidgetModules: all modules preloaded — skipping dynamic load", preloadCheck);
       return Promise.resolve();
     }
-    console.warn("[JinjaWidget] ensureWidgetModules: some modules missing, loading dynamically", {
-      ...preloadCheck,
-      WIDGET_BASE: WIDGET_BASE,
-      modulesToLoad: WIDGET_MODULES,
-    });
     // Scope cache by widget base path so version upgrades in the same tab
     // don't reuse stale module promises from an older install.
     const cache =
       (window.__jinjaWidgetModulesReadyByBase =
         window.__jinjaWidgetModulesReadyByBase || {});
     if (cache[WIDGET_BASE]) {
-      console.warn("[JinjaWidget] ensureWidgetModules: reusing cached load promise for", WIDGET_BASE);
       return cache[WIDGET_BASE];
     }
     // Load constants first (in parallel), then the monaco module which reads them.
     const constants = WIDGET_MODULES.slice(0, -1).map(loadScript);
     const service = WIDGET_MODULES[WIDGET_MODULES.length - 1];
     cache[WIDGET_BASE] = Promise.all(constants)
-      .then(() => {
-        console.warn("[JinjaWidget] ensureWidgetModules: constants loaded, loading service", { service: service });
-        return loadScript(service);
-      })
-      .then(() => {
-        const ns2 = window.JinjaEditorWidget || {};
-        console.warn("[JinjaWidget] ensureWidgetModules: all modules loaded", {
-          hasMonaco: !!(ns2.monaco && typeof ns2.monaco.ensure === "function"),
-          hasLanguageDef: !!ns2.languageDefinition,
-          hasFilterSignatures: !!ns2.filterSignatures,
-          filterCount: ns2.filterSignatures ? Object.keys(ns2.filterSignatures).length : 0,
-          hasSnippets: !!ns2.snippets,
-          snippetCount: Array.isArray(ns2.snippets) ? ns2.snippets.length : 0,
-          hasTemplateExamples: !!ns2.templateExamples,
-          exampleCount: Array.isArray(ns2.templateExamples) ? ns2.templateExamples.length : 0,
-        });
-      })
+      .then(() => loadScript(service))
       .catch((e) => {
         console.warn("[JinjaWidget] ensureWidgetModules: dynamic load FAILED", {
           error: e && e.message,
@@ -270,7 +240,7 @@
     return cache[WIDGET_BASE];
   }
 
-  function jinjaEditorWidget113DevCtrl(
+  function jinjaEditorWidget114DevCtrl(
     $scope,
     $rootScope,
     $state,
@@ -282,16 +252,6 @@
     toaster,
     CommonUtils
   ) {
-    console.warn("[JinjaWidget] controller entered", {
-      WIDGET_BASE: WIDGET_BASE,
-      WIDGET_VERSION: WIDGET_VERSION,
-      stateName: $state && $state.current && $state.current.name,
-      stateParams: $state && $state.params,
-      configKeys: config ? Object.keys(config) : null,
-      defaultTemplate: config && config.defaultTemplate
-        ? config.defaultTemplate.slice(0, 80)
-        : "(none)",
-    });
     $scope.config = config;
     $scope.angular = angular;
     $scope.widgetVersion = WIDGET_VERSION;
@@ -424,9 +384,6 @@
 
     $scope.onInputEditorReady = function (editor) {
       inputEditor = editor;
-      console.warn("[JinjaWidget] input editor ready via directive", {
-        languageId: editor.getModel() && editor.getModel().getLanguageId(),
-      });
     };
     $scope.onTemplateEditorReady = function (editor) {
       templateEditor = editor;
@@ -440,20 +397,11 @@
       editor.onDidChangeModelContent(function () {
         onTemplateContentChanged();
       });
-      console.warn("[JinjaWidget] template editor ready via directive", {
-        languageId: editor.getModel() && editor.getModel().getLanguageId(),
-        enhanced: hasEnhance,
-      });
     };
 
-    console.warn("[JinjaWidget] starting ensureWidgetModules → ensure() chain");
     ensureWidgetModules()
       .then(() => window.JinjaEditorWidget.monaco.ensure())
-      .then((monaco) => {
-        console.warn("[JinjaWidget] monaco.ensure() resolved", {
-          monacoOk: !!monaco,
-          windowMonacoMatches: window.monaco === monaco,
-        });
+      .then(() => {
         $timeout(() => {
           $scope.templateExamples = getTemplateExamples();
           // Flip the flag *after* language/theme registration so the
@@ -463,7 +411,6 @@
           // above may have fired before this point (before themes existed).
           applyMonacoTheme();
           pushInputContext($scope.inputJsonText);
-          console.warn("[JinjaWidget] monacoReady = true");
         });
       })
       .catch((err) => {
@@ -1216,13 +1163,11 @@
         : $scope.templateText;
 
       if (!templateToRender || !templateToRender.trim()) {
-        console.warn("[JinjaWidget] submit: blocked — template is empty");
         toaster.warning({ body: "Template is required." });
         return;
       }
       const values = parseInput();
       if (values === null) {
-        console.warn("[JinjaWidget] submit: blocked — input JSON malformed", { error: $scope.inputJsonError });
         $scope.isErrorOutput = true;
         $scope.output = "Input JSON is malformed: " + $scope.inputJsonError;
         return;
@@ -1242,11 +1187,6 @@
         markerIsFromScan = true;
       }
 
-      console.warn("[JinjaWidget] submit: calling evaluateJinja", {
-        templateLength: templateToRender.length,
-        templatePreview: templateToRender.slice(0, 80),
-        valuesKeys: values ? Object.keys(values) : null,
-      });
       $scope.processing = true;
       $scope.isErrorOutput = false;
 
@@ -1254,13 +1194,6 @@
         .evaluateJinja({ template: templateToRender, values: values })
         .then(
           function (res) {
-            console.warn("[JinjaWidget] submit: evaluateJinja resolved", {
-              hasResult: !!(res && res.result !== undefined),
-              resultType: res && typeof res.result,
-              resultPreview: res && typeof res.result === "string"
-                ? res.result.slice(0, 100)
-                : JSON.stringify(res && res.result).slice(0, 100),
-            });
             $scope.output = res && res.result;
             $scope.isErrorOutput = false;
             clearTemplateMarkers();
@@ -1271,13 +1204,6 @@
               (err && err.statusText) ||
               "Unknown error";
             const translatedMsg = translateJinjaError(msg);
-            console.warn("[JinjaWidget] submit: evaluateJinja FAILED", {
-              status: err && err.status,
-              statusText: err && err.statusText,
-              data: err && err.data,
-              message: msg,
-              translated: translatedMsg,
-            });
             $scope.isErrorOutput = true;
             $scope.output = "Error: " + translatedMsg;
             // Clear warnings first, then set error marker if found
@@ -1342,7 +1268,6 @@
     function loadCurrentRecord() {
       const module = $state.params && $state.params.module;
       const id = $state.params && $state.params.id;
-      console.warn("[JinjaWidget] loadCurrentRecord", { module: module, id: id });
 
       if (!module || !id) {
         toaster.warning({ body: "No record in scope." });
@@ -1352,18 +1277,9 @@
       Modules.get({ module: module, id: id })
         .$promise.then(
           function (record) {
-            console.warn("[JinjaWidget] loadCurrentRecord: record fetched", {
-              module: module,
-              id: id,
-              keys: Object.keys(record).filter((k) => k !== "$promise" && k !== "$resolved"),
-            });
             applyRecordToInput(record);
           },
           function (err) {
-            console.warn("[JinjaWidget] loadCurrentRecord: FAILED", {
-              status: err && err.status,
-              statusText: err && err.statusText,
-            });
             toaster.error({
               body:
                 "Failed to load record: " +
