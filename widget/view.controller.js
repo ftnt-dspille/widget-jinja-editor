@@ -316,10 +316,7 @@
 
     let inputEditor = null;
     let templateEditor = null;
-    // true when the active marker was placed by the client-side unclosed-tag
-    // scan rather than a server-provided line number. Used to decide whether
-    // to re-scan on content changes instead of simply clearing.
-    let markerIsFromScan = false;
+    let templateContentDisposable = null;
     let markerReScanTimer = null;
 
     // Derive Monaco theme names from $rootScope.theme.id (set by SOAR).
@@ -371,6 +368,9 @@
       matchBrackets: "always",
       bracketPairColorization: { enabled: true },
       "semanticHighlighting.enabled": true,
+      // Render hover/suggestion widgets in a fixed-position layer attached to
+      // <body> so they aren't clipped by ancestors with overflow:hidden.
+      fixedOverflowWidgets: true,
     };
 
     // React to the user switching SOAR themes at runtime.
@@ -394,9 +394,11 @@
       if (hasEnhance) {
         window.JinjaEditorWidget.monaco.enhanceEditor(templateEditor);
       }
-      editor.onDidChangeModelContent(function () {
+      templateContentDisposable = editor.onDidChangeModelContent(function () {
         onTemplateContentChanged();
       });
+      // Initial scan so squiggles appear without requiring a render or edit.
+      scheduleTemplateScan(0);
     };
 
     ensureWidgetModules()
@@ -421,7 +423,11 @@
         toaster.error({ body: "Editor failed to load: " + err.message });
       });
 
-    $scope.$watch("inputJsonText", (val) => pushInputContext(val));
+    $scope.$watch("inputJsonText", (val) => {
+      pushInputContext(val);
+      // Path-existence warnings depend on input JSON — rescan when it changes.
+      if (templateEditor) scheduleTemplateScan(600);
+    });
 
     // Parse the Input pane silently and push the resulting object to the
     // Monaco completion provider. Invalid JSON is ignored here — we surface
@@ -1005,9 +1011,16 @@
               message: "Unclosed expression — did you mean {{ ... }}?",
             });
           } else {
+            const expr = line.slice(exprOpenIdx + 2, exprCloseIdx);
+            // Case: pipe followed by no filter name (e.g. `{{ x | }}`).
+            if (/\|\s*$/.test(expr)) {
+              findings.push({
+                line: lineNum,
+                message: "Missing filter name after `|` — add a filter (e.g. `| upper`) or remove the pipe",
+              });
+            }
             // Case 6: Unknown filters
             if (knownFilters) {
-              const expr = line.slice(exprOpenIdx + 2, exprCloseIdx);
               const filterMatches = expr.match(/\|\s*(\w+)/g);
               if (filterMatches) {
                 for (const fm of filterMatches) {
@@ -1080,11 +1093,79 @@
     }
 
     function clearTemplateMarkers() {
-      markerIsFromScan = false;
       if (markerReScanTimer) { clearTimeout(markerReScanTimer); markerReScanTimer = null; }
       if (!templateEditor || !window.monaco) return;
       const model = templateEditor.getModel();
       if (model) window.monaco.editor.setModelMarkers(model, "jinja-render", []);
+    }
+
+    function runTemplateScan() {
+      if (!templateEditor || !window.monaco) return;
+      const template = templateEditor.getValue();
+      if (!template || !template.trim()) {
+        clearTemplateMarkers();
+        return;
+      }
+      const inputData = parseInput();
+      const knownFilters = new Set(Object.keys(getFilterSignatures()));
+      const findings = scanTemplate(template, inputData || {}, knownFilters);
+      // Path-existence warnings only make sense when input JSON is valid.
+      if (inputData) {
+        const pathFindings = checkInputPaths(template, inputData);
+        for (const pf of pathFindings) {
+          findings.push({
+            line: pf.line,
+            message: pf.message,
+            severity: window.monaco.MarkerSeverity ? window.monaco.MarkerSeverity.Warning : 4,
+          });
+        }
+      }
+      if (findings.length > 0) {
+        applyMarkers(findings);
+      } else {
+        clearTemplateMarkers();
+      }
+    }
+
+    function scheduleTemplateScan(delayMs) {
+      if (markerReScanTimer) clearTimeout(markerReScanTimer);
+      markerReScanTimer = setTimeout(function () {
+        markerReScanTimer = null;
+        runTemplateScan();
+      }, typeof delayMs === "number" ? delayMs : 600);
+    }
+
+    // Narrow a squiggle to the offending {{ … }} or {% … %} on the line so the
+    // hover tooltip is easy to trigger and visually attached to the right span.
+    // Falls back to the line's non-whitespace range if no template markers found.
+    function computeMarkerRange(lineContent, finding) {
+      if (finding.startColumn && finding.endColumn) {
+        return { startCol: finding.startColumn, endCol: finding.endColumn };
+      }
+      // Prefer the open marker mentioned in the message, else whichever appears.
+      const msg = (finding.message || "").toLowerCase();
+      let openIdx = -1;
+      let close;
+      if (msg.indexOf("block tag") !== -1 || msg.indexOf("end") !== -1 ||
+          msg.indexOf("never closed") !== -1 || msg.indexOf("{%") !== -1) {
+        openIdx = lineContent.indexOf("{%");
+        close = "%}";
+      }
+      if (openIdx === -1) {
+        openIdx = lineContent.indexOf("{{");
+        close = "}}";
+      }
+      if (openIdx === -1) {
+        openIdx = lineContent.indexOf("{%");
+        close = "%}";
+      }
+      if (openIdx === -1) {
+        const ws = lineContent.search(/\S/);
+        return { startCol: (ws >= 0 ? ws + 1 : 1), endCol: lineContent.length + 1 };
+      }
+      const closeIdx = lineContent.indexOf(close, openIdx + 2);
+      const endCol = closeIdx === -1 ? lineContent.length + 1 : closeIdx + close.length + 1;
+      return { startCol: openIdx + 1, endCol: endCol };
     }
 
     function applyMarkers(findings) {
@@ -1097,15 +1178,15 @@
         const msg = finding.message;
         const severity = finding.severity || (window.monaco.MarkerSeverity ? window.monaco.MarkerSeverity.Error : 8);
         const lineContent = (model.getLineContent ? model.getLineContent(lineNumber) : null) || "";
-        const startCol = (lineContent.search(/\S/) + 1) || 1;
-        const endCol = lineContent.length + 1;
+        const range = computeMarkerRange(lineContent, finding);
         markers.push({
           severity: severity,
           message: msg,
+          source: "jinja",
           startLineNumber: lineNumber,
-          startColumn: startCol,
+          startColumn: range.startCol,
           endLineNumber: lineNumber,
-          endColumn: endCol,
+          endColumn: range.endCol,
         });
       }
       window.monaco.editor.setModelMarkers(model, "jinja-render", markers);
@@ -1115,56 +1196,49 @@
       applyMarkers([{ line: lineNumber, message: msg }]);
     }
 
-    function setTemplateErrorMarker(msg) {
+    // Add a single error marker without dropping the existing markers (e.g.
+    // scan findings) on the editor. Used for server-side render errors so the
+    // server squiggle coexists with live-scan squiggles.
+    function appendServerErrorMarker(lineNumber, msg) {
       if (!templateEditor || !window.monaco) return;
-
-      const serverLine = parseErrorLineNumber(msg);
-      if (serverLine) {
-        markerIsFromScan = false;
-        applyMarkerAtLine(serverLine, msg);
-        return;
-      }
-
-      // No server-provided line — run the full scan to surface structural issues
-      // (mismatched tags, unknown filters, empty records, etc.).
-      const inputData = parseInput();
-      const knownFilters = new Set(Object.keys(getFilterSignatures()));
-      const scanFindings = scanTemplate(templateEditor.getValue(), inputData, knownFilters);
-      if (scanFindings.length > 0) {
-        markerIsFromScan = true;
-        applyMarkers(scanFindings);
-        return;
-      }
-
-      // Last resort: simple unclosed-tag line scan.
-      const scannedLine = findUnclosedTagLine(templateEditor.getValue());
-      if (!scannedLine) return;
-
-      markerIsFromScan = true;
-      applyMarkerAtLine(scannedLine, msg);
+      const model = templateEditor.getModel();
+      if (!model) return;
+      const existing = (window.monaco.editor.getModelMarkers
+        ? window.monaco.editor.getModelMarkers({ owner: "jinja-render", resource: model.uri })
+        : []) || [];
+      const lineContent = (model.getLineContent ? model.getLineContent(lineNumber) : null) || "";
+      const range = computeMarkerRange(lineContent, { message: msg });
+      const severity = window.monaco.MarkerSeverity ? window.monaco.MarkerSeverity.Error : 8;
+      const merged = existing.concat([{
+        severity: severity,
+        message: msg,
+        source: "jinja",
+        startLineNumber: lineNumber,
+        startColumn: range.startCol,
+        endLineNumber: lineNumber,
+        endColumn: range.endCol,
+      }]);
+      window.monaco.editor.setModelMarkers(model, "jinja-render", merged);
     }
 
-    // Called on every content-change. For scan-based markers, debounce a
-    // re-scan with the full scanTemplate logic so the squiggle persists until fixed.
-    function onTemplateContentChanged() {
-      if (!markerIsFromScan) {
-        clearTemplateMarkers();
+    function setTemplateErrorMarker(msg) {
+      if (!templateEditor || !window.monaco) return;
+      const serverLine = parseErrorLineNumber(msg);
+      if (serverLine) {
+        appendServerErrorMarker(serverLine, msg);
         return;
       }
-      if (markerReScanTimer) clearTimeout(markerReScanTimer);
-      markerReScanTimer = setTimeout(function () {
-        markerReScanTimer = null;
-        if (!templateEditor || !window.monaco) return;
-        const template = templateEditor.getValue();
-        const inputData = parseInput();
-        const knownFilters = new Set(Object.keys(getFilterSignatures()));
-        const findings = scanTemplate(template, inputData, knownFilters);
-        if (findings.length > 0) {
-          applyMarkers(findings);
-        } else {
-          clearTemplateMarkers();
-        }
-      }, 600);
+      // No server-provided line — let the live scan keep whatever findings
+      // it already has. If the scan hasn't run yet (rare), fall back to the
+      // unclosed-tag line scan.
+      const scannedLine = findUnclosedTagLine(templateEditor.getValue());
+      if (scannedLine) appendServerErrorMarker(scannedLine, msg);
+    }
+
+    // Called on every content-change. Always debounce a full live scan
+    // (structural + path warnings) so squiggles update without requiring Render.
+    function onTemplateContentChanged() {
+      scheduleTemplateScan(600);
     }
 
     function submit() {
@@ -1185,19 +1259,9 @@
         return;
       }
 
-      // Check for unresolved paths in the template (advisory warnings)
-      const pathFindings = checkInputPaths(templateToRender, values);
-      if (pathFindings.length > 0) {
-        const warningMarkers = pathFindings.map(function (f) {
-          return {
-            line: f.line,
-            message: f.message,
-            severity: window.monaco.MarkerSeverity ? window.monaco.MarkerSeverity.Warning : 4,
-          };
-        });
-        applyMarkers(warningMarkers);
-        markerIsFromScan = true;
-      }
+      // Force a fresh live scan so warnings/errors are current when Render is
+      // clicked, even if the debounced scan hasn't fired yet.
+      runTemplateScan();
 
       $scope.processing = true;
       $scope.isErrorOutput = false;
@@ -1208,7 +1272,9 @@
           function (res) {
             $scope.output = res && res.result;
             $scope.isErrorOutput = false;
-            clearTemplateMarkers();
+            // Refresh scan-based squiggles instead of clearing — render
+            // succeeding doesn't mean the template is lint-clean.
+            runTemplateScan();
           },
           function (err) {
             const msg =
@@ -1218,8 +1284,9 @@
             const translatedMsg = translateJinjaError(msg);
             $scope.isErrorOutput = true;
             $scope.output = "Error: " + translatedMsg;
-            // Clear warnings first, then set error marker if found
-            clearTemplateMarkers();
+            // Refresh scan markers, then overlay the server-side error marker
+            // (if it has a line) on top so both kinds of squiggles coexist.
+            runTemplateScan();
             setTemplateErrorMarker(translatedMsg);
           }
         )
@@ -1327,6 +1394,10 @@
     $scope.$on("$destroy", function () {
       document.removeEventListener("keydown", onPaletteKey);
       if (markerReScanTimer) { clearTimeout(markerReScanTimer); markerReScanTimer = null; }
+      if (templateContentDisposable && typeof templateContentDisposable.dispose === "function") {
+        templateContentDisposable.dispose();
+        templateContentDisposable = null;
+      }
     });
   }
 })();

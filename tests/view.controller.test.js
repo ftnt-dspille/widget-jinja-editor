@@ -36,7 +36,18 @@ global.monaco = {
     })),
     defineTheme: jest.fn(),
     setTheme: jest.fn(),
-    setModelMarkers: jest.fn(),
+    // Tracks the last marker set per owner so getModelMarkers can return it —
+    // appendServerErrorMarker reads existing markers before re-applying.
+    __markersByOwner: {},
+    setModelMarkers: jest.fn(function (model, owner, markers) {
+      this.__markersByOwner[owner] = markers.slice();
+    }),
+    getModelMarkers: jest.fn(function (filter) {
+      const owner = (filter && filter.owner) || null;
+      if (owner) return (this.__markersByOwner[owner] || []).slice();
+      return Object.keys(this.__markersByOwner).reduce(
+        (acc, k) => acc.concat(this.__markersByOwner[k]), []);
+    }),
   },
   MarkerSeverity: { Error: 8, Warning: 4, Info: 2, Hint: 1 },
   languages: {
@@ -1194,12 +1205,13 @@ describe("error markers", () => {
     );
   });
 
-  test("markers are cleared on successful render", () => {
+  test("markers are cleared on successful render when the live scan is clean", () => {
     const d = $q.defer();
     const evaluateJinja = jest.fn(() => d.promise);
     const { scope, mockModel } = createReadyCtrl({ dynamicValueService: { evaluateJinja } });
 
-    scope.inputJsonText = "{}";
+    // Input resolves the "bad" reference so the live scan finds nothing.
+    scope.inputJsonText = '{"bad":"x"}';
     scope.submit();
     d.resolve({ result: "Ada" });
     $rootScope.$apply();
@@ -1211,14 +1223,54 @@ describe("error markers", () => {
     );
   });
 
-  test("server-line marker is cleared immediately when the template content changes", () => {
-    // A marker placed by a server-provided line number cannot be re-verified
-    // client-side, so it should clear on the first keystroke.
+  test("scan-based markers persist after a successful render", () => {
+    // Bug fix: render success used to wipe live-scan squiggles. Now the
+    // live scan is rerun and its findings remain visible.
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    const { scope, mockModel } = createReadyCtrl({ dynamicValueService: { evaluateJinja } });
+
+    // Empty input → "bad" path warning persists.
+    scope.inputJsonText = "{}";
+    scope.submit();
+    d.resolve({ result: "" });
+    $rootScope.$apply();
+
+    const calls = global.monaco.editor.setModelMarkers.mock.calls;
+    const lastForJinja = calls.filter((c) => c[1] === "jinja-render").slice(-1)[0];
+    expect(lastForJinja).toBeDefined();
+    expect(lastForJinja[2].length).toBeGreaterThan(0);
+    expect(lastForJinja[2][0].message).toMatch(/not found/i);
+  });
+
+  test("server error marker is appended on top of scan markers, not replacing them", () => {
+    const d = $q.defer();
+    const evaluateJinja = jest.fn(() => d.promise);
+    const { scope, mockModel } = createReadyCtrl({ dynamicValueService: { evaluateJinja } });
+
+    scope.inputJsonText = "{}";
+    scope.submit();
+    d.reject({ statusText: "Bad Request", data: { message: "Jinja syntax error at line 1" } });
+    $rootScope.$apply();
+
+    const calls = global.monaco.editor.setModelMarkers.mock.calls;
+    const lastForJinja = calls.filter((c) => c[1] === "jinja-render").slice(-1)[0];
+    const markers = lastForJinja[2];
+    // Expect both: the path-warning (severity 4) and the server-error (severity 8).
+    expect(markers.some((m) => m.severity === 4)).toBe(true);
+    expect(markers.some((m) => m.severity === 8)).toBe(true);
+  });
+
+  test("server-line marker is replaced by the live scan when the template content changes", () => {
+    // After the live-scan refactor, a server-line marker is not cleared
+    // immediately on keystroke — instead the debounced live scan replaces
+    // markers with whatever it finds (or clears them if nothing is wrong).
     const d = $q.defer();
     const evaluateJinja = jest.fn(() => d.promise);
     const { scope, mockEditor, mockModel } = createReadyCtrl({ dynamicValueService: { evaluateJinja } });
 
-    scope.inputJsonText = "{}";
+    // Provide input that resolves "bad" so the live scan finds nothing.
+    scope.inputJsonText = '{"bad":"x"}';
     scope.submit();
     d.reject({ statusText: "Bad Request", data: { message: "Jinja syntax error at line 1" } });
     $rootScope.$apply();
@@ -1227,6 +1279,7 @@ describe("error markers", () => {
 
     const changeHandler = mockEditor.onDidChangeModelContent.mock.calls[0][0];
     changeHandler();
+    jest.runAllTimers();
 
     expect(global.monaco.editor.setModelMarkers).toHaveBeenCalledWith(
       mockModel,
@@ -1308,7 +1361,8 @@ describe("error markers", () => {
     };
     scope.onTemplateEditorReady(brokenEditor);
 
-    scope.inputJsonText = "{}";
+    // Provide input that resolves "test" so path warnings don't trip the assertion.
+    scope.inputJsonText = '{"test":"x","condition":true}';
     scope.submit();
     d.reject({ statusText: "Bad Request", data: { message: "unexpected end of template, expected 'end of statement block'" } });
     $rootScope.$apply();
@@ -1325,6 +1379,98 @@ describe("error markers", () => {
       "jinja-render",
       []
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live scan — debounced scan that runs on edits/input changes without Render
+// ---------------------------------------------------------------------------
+describe("live scan (no prior Render)", () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  function makeReadyCtrl(template, inputJson) {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+    let currentTemplate = template;
+    const model = {
+      getLanguageId: jest.fn(() => "jinja2"),
+      getLineContent: jest.fn((n) => currentTemplate.split("\n")[n - 1] || ""),
+      getValueInRange: jest.fn(() => ""),
+    };
+    let changeHandler;
+    const disposeFn = jest.fn();
+    const editor = {
+      getValue: jest.fn(() => currentTemplate),
+      setValue: jest.fn(),
+      getModel: jest.fn(() => model),
+      getPosition: jest.fn(() => ({ lineNumber: 1, column: 1 })),
+      getSelection: jest.fn(() => ({})),
+      executeEdits: jest.fn(),
+      getContribution: jest.fn(() => null),
+      focus: jest.fn(),
+      onDidChangeModelContent: jest.fn((fn) => { changeHandler = fn; return { dispose: disposeFn }; }),
+    };
+    if (inputJson !== undefined) scope.inputJsonText = inputJson;
+    scope.onTemplateEditorReady(editor);
+    return { scope, model, editor, disposeFn,
+      changeTo: function (t) { currentTemplate = t; changeHandler(); jest.runAllTimers(); } };
+  }
+
+  test("structural error squiggles appear on edit without clicking Render", () => {
+    const { changeTo, model } = makeReadyCtrl("Hello", '{"name":"Ada"}');
+    global.monaco.editor.setModelMarkers.mockClear();
+    changeTo("{% if x ");
+    const calls = global.monaco.editor.setModelMarkers.mock.calls.filter((c) => c[2].length > 0);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][1]).toBe("jinja-render");
+    expect(calls[0][2].some((m) => /unclosed block tag/i.test(m.message))).toBe(true);
+  });
+
+  test("path-existence warnings appear on edit without clicking Render", () => {
+    const { changeTo } = makeReadyCtrl("hello", '{"foo":1}');
+    global.monaco.editor.setModelMarkers.mockClear();
+    changeTo("{{ vars.bogus }}");
+    const warningCalls = global.monaco.editor.setModelMarkers.mock.calls
+      .filter((c) => c[2].some((m) => m.severity === 4));
+    expect(warningCalls.length).toBeGreaterThan(0);
+  });
+
+  test("changing the input JSON reruns the scan and clears stale path warnings", () => {
+    const { scope, changeTo } = makeReadyCtrl("hello", '{}');
+    changeTo("{{ vars.x }}");
+    expect(global.monaco.editor.setModelMarkers.mock.calls
+      .some((c) => c[2].some((m) => m.severity === 4))).toBe(true);
+
+    global.monaco.editor.setModelMarkers.mockClear();
+    scope.inputJsonText = '{"vars":{"x":1}}';
+    $rootScope.$apply();
+    jest.runAllTimers();
+
+    const lastCall = global.monaco.editor.setModelMarkers.mock.calls.slice(-1)[0];
+    expect(lastCall[2]).toEqual([]);
+  });
+
+  test("squiggle is narrowed to the {{ … span instead of the whole line", () => {
+    const { changeTo, model } = makeReadyCtrl("hello", '{}');
+    global.monaco.editor.setModelMarkers.mockClear();
+    // Leading whitespace + literal text before the unclosed expression.
+    changeTo("Name:    {{ vars.input.records[0].name");
+    const calls = global.monaco.editor.setModelMarkers.mock.calls.filter((c) => c[2].length > 0);
+    expect(calls.length).toBeGreaterThan(0);
+    const marker = calls[0][2].find((m) => /unclosed expression/i.test(m.message));
+    expect(marker).toBeDefined();
+    // "{{" starts at column 10 (1-indexed).
+    expect(marker.startColumn).toBe(10);
+    // No closing }}, so span runs to end of line.
+    expect(marker.endColumn).toBe("Name:    {{ vars.input.records[0].name".length + 1);
+  });
+
+  test("$destroy disposes the onDidChangeModelContent listener", () => {
+    const { scope, disposeFn } = makeReadyCtrl("hello", '{}');
+    scope.$destroy();
+    expect(disposeFn).toHaveBeenCalled();
   });
 });
 
@@ -1421,6 +1567,28 @@ describe("scanTemplate()", () => {
   test("case 3 — flags if block never closed with endif", () => {
     const msgs = errorMessages(scanViaSubmit("{% if condition %}\n  hello", undefined, ["upper"]));
     expect(msgs.some((m) => /never closed|endif/i.test(m))).toBe(true);
+  });
+
+  // Missing filter name after a pipe
+  test("flags `{{ x | }}` (pipe with no filter name)", () => {
+    const msgs = errorMessages(scanViaSubmit(
+      "{{ vars.input.records[0].name | }}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } }),
+      ["upper"]
+    ));
+    expect(msgs.some((m) => /missing filter name/i.test(m))).toBe(true);
+  });
+
+  test("does not flag `{{ x | upper }}` as missing filter", () => {
+    const calls = scanViaSubmit(
+      "{{ vars.input.records[0].name | upper }}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } }),
+      ["upper"]
+    );
+    const msgs = calls
+      .filter((c) => c[2].some((m) => /missing filter name/i.test(m.message)))
+      .flatMap((c) => c[2].map((m) => m.message));
+    expect(msgs).toHaveLength(0);
   });
 
   // Case 6: empty vars.input.records
