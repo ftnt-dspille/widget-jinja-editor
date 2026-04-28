@@ -3,12 +3,12 @@
      Copyright (c) 2026 Dylan Spille
      Copyright end -->
 <link rel="stylesheet" type="text/css"
-      href="jinjaEditorWidget-1.1.4/widgetAssets/css/jinjaEditorWidget.css" />
-<script src="jinjaEditorWidget-1.1.4/widgetAssets/js/constants/jinjaFilters.constants.js"></script>
-<script src="jinjaEditorWidget-1.1.4/widgetAssets/js/constants/jinjaSnippets.constants.js"></script>
-<script src="jinjaEditorWidget-1.1.4/widgetAssets/js/constants/jinjaTemplates.constants.js"></script>
-<script src="jinjaEditorWidget-1.1.4/widgetAssets/js/constants/jinjaLanguage.constants.js"></script>
-<script src="jinjaEditorWidget-1.1.4/widgetAssets/js/jinjaMonaco.service.js"></script>
+      href="jinjaEditorWidget-1.1.14/widgetAssets/css/jinjaEditorWidget.css" />
+<script src="jinjaEditorWidget-1.1.14/widgetAssets/js/constants/jinjaFilters.constants.js"></script>
+<script src="jinjaEditorWidget-1.1.14/widgetAssets/js/constants/jinjaSnippets.constants.js"></script>
+<script src="jinjaEditorWidget-1.1.14/widgetAssets/js/constants/jinjaTemplates.constants.js"></script>
+<script src="jinjaEditorWidget-1.1.14/widgetAssets/js/constants/jinjaLanguage.constants.js"></script>
+<script src="jinjaEditorWidget-1.1.14/widgetAssets/js/jinjaMonaco.service.js"></script>
 
 <!-- No `data-ng-controller` attribute on the root: SOAR's csWidgetContent
      directive instantiates the controller by name (from the widget
@@ -44,6 +44,7 @@
         <option value="equal">Layout: equal</option>
         <option value="outputFocus">Layout: output focus</option>
         <option value="templateFocus">Layout: template focus</option>
+        <option value="splitBottom">Layout: split (output bottom)</option>
         <option value="stacked">Layout: stacked</option>
       </select>
       <button type="button"
@@ -57,6 +58,32 @@
               data-ng-disabled="processing || !monacoReady">
         Render<i class="fa fa-arrow-right margin-left-sm"></i>
       </button>
+    </div>
+  </div>
+
+  <!-- Playbook execution history picker (only on main.playbookDetail and only
+       when SOAR's csJinjaEditorLog directive is available — see view.controller.js
+       for the gating logic that sets $scope.playbookEntity). The directive owns
+       the dropdown UI + filter; we own the "Load Env JSON" button. -->
+  <div class="jinja-history-row padding-left-lg padding-right-lg padding-top-sm"
+       data-ng-if="playbookEntity">
+    <div class="display-flex form-group margin-0" style="align-items: end">
+      <div class="form-group jinja-log-container margin-0"
+           style="flex: 0 1 480px; min-width: 240px"
+           data-cs-jinja-editor-log
+           data-ng-model="selectedRunningPlaybook"
+           data-playbook-entity="playbookEntity"
+           data-open-direction="down"></div>
+      <div class="margin-left-sm">
+        <button type="button"
+                class="btn btn-default btn-sm margin-top-sm"
+                data-ng-click="loadRunningPlaybook(selectedRunningPlaybook)"
+                data-ng-disabled="(selectedRunningPlaybook === undefined) || envProcessing">
+          Load Env JSON
+          <span class="margin-left-sm fa fa-spinner fa-spin"
+                data-ng-show="envProcessing"></span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -78,6 +105,13 @@
                     data-ng-click="formatInput()"
                     data-ng-disabled="!monacoReady">
               <i class="fa fa-magic margin-right-sm"></i>Format JSON
+            </button>
+            <button type="button"
+                    class="btn btn-default btn-xs margin-left-sm jinja-output-expand"
+                    data-ng-click="openInputModal()"
+                    data-ng-disabled="!monacoReady"
+                    title="Open input in a larger view">
+              <i class="fa fa-expand"></i>
             </button>
           </div>
         </div>
@@ -122,6 +156,13 @@
                       data-ng-value="example.id"
                       title="{{ example.description }}">{{ example.label }}</option>
             </select>
+            <button type="button"
+                    class="btn btn-default btn-xs margin-left-sm jinja-output-expand"
+                    data-ng-click="openTemplateModal()"
+                    data-ng-disabled="!monacoReady"
+                    title="Open template in a larger view">
+              <i class="fa fa-expand"></i>
+            </button>
           </div>
         </div>
         <div class="font-size-12 muted-65 margin-bottom-sm">
@@ -298,6 +339,61 @@
         <div class="jinja-html-preview jinja-output-modal-html"
              data-ng-if="resolveOutputTab() === 'html'"
              data-jinja-html-preview="output"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input expand modal -->
+  <div class="jinja-output-modal-backdrop"
+       data-ng-if="inputModalOpen"
+       data-ng-click="closeInputModal()">
+    <div class="jinja-output-modal" data-ng-click="$event.stopPropagation()">
+      <div class="jinja-output-modal-header">
+        <strong>Input</strong>
+        <button type="button"
+                class="btn btn-xs btn-default margin-left-md"
+                data-ng-click="formatInput()"
+                data-ng-disabled="!monacoReady">
+          <i class="fa fa-magic margin-right-sm"></i>Format JSON
+        </button>
+        <button type="button"
+                class="btn btn-link btn-sm jinja-output-modal-close"
+                data-ng-click="closeInputModal()"
+                title="Close (Esc)">
+          <i class="fa fa-times"></i>
+        </button>
+      </div>
+      <div class="jinja-output-modal-body">
+        <div class="monaco-pane jinja-output-modal-monaco"
+             data-ng-class="{'has-error-border': inputJsonError}"
+             data-ng-if="monacoReady"
+             data-monaco-editor
+             data-editor-config="inputModalEditorConfig"
+             data-editor-content="inputJsonText"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Template expand modal -->
+  <div class="jinja-output-modal-backdrop"
+       data-ng-if="templateModalOpen"
+       data-ng-click="closeTemplateModal()">
+    <div class="jinja-output-modal" data-ng-click="$event.stopPropagation()">
+      <div class="jinja-output-modal-header">
+        <strong>Jinja template</strong>
+        <button type="button"
+                class="btn btn-link btn-sm jinja-output-modal-close"
+                data-ng-click="closeTemplateModal()"
+                title="Close (Esc)">
+          <i class="fa fa-times"></i>
+        </button>
+      </div>
+      <div class="jinja-output-modal-body">
+        <div class="monaco-pane jinja-output-modal-monaco"
+             data-ng-if="monacoReady"
+             data-monaco-editor
+             data-editor-config="templateModalEditorConfig"
+             data-editor-content="templateText"></div>
       </div>
     </div>
   </div>

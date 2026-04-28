@@ -592,3 +592,44 @@ body > .jinja-output-modal-backdrop {
     max-height: 60vh;
   }
 }
+
+/* Drawer (custom popup) sizing override.
+   #custom-modal lives outside the widget scope. We widen + scroll-cap it,
+   but we deliberately do NOT touch `left`/`top` here — SOAR's drag handler
+   (app.unmin.js:26250) writes those inline, and any !important on them
+   would freeze the drag. Initial centering is done in JS on mount. */
+/* "splitBottom" layout: output sits below input+template on a wrapped row.
+   Add breathing room above it and let the output area grow taller than the
+   default 340px so the wider full-width pane doesn't look squat. */
+.jinja-editor-widget .jinja-pane.jinja-pane-bottom { margin-top: 12px; }
+.jinja-editor-widget .jinja-pane.jinja-pane-bottom .output-area,
+.jinja-editor-widget .jinja-pane.jinja-pane-bottom .monaco-pane,
+.jinja-editor-widget .jinja-pane.jinja-pane-bottom .jinja-code-area {
+  min-height: 420px;
+  height: 420px;
+}
+
+.jinja-editor-widget-drawer-host#custom-modal {
+  width: min(1200px, 95vw) !important;
+  max-width: 95vw !important;
+  max-height: 90vh !important;
+  /* SOAR's base #custom-modal rule sets `left: 100%` + `transform: translate(-100%, 0%)`,
+     which together flush the modal to the right edge based on the default 320px width.
+     With our wider modal, that combo lands off-screen. Neutralize the transform and
+     center via `left`/`top`. No `!important` on left/top so SOAR's drag handler
+     (which writes inline styles) can still move the modal. */
+  transform: none !important;
+  left: max(20px, calc((100vw - min(1200px, 95vw)) / 2));
+  top: 5vh;
+}
+.jinja-editor-widget-drawer-host#custom-modal .custom-modal {
+  width: 100% !important;
+  max-height: 90vh !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.jinja-editor-widget-drawer-host#custom-modal .custom-modal-body {
+  flex: 1 1 auto !important;
+  overflow: auto !important;
+  max-height: calc(90vh - 30px) !important;
+}

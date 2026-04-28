@@ -29,7 +29,7 @@
 
   angular
     .module("cybersponse")
-    .controller("jinjaEditorWidget114DevCtrl", jinjaEditorWidget114DevCtrl)
+    .controller("jinjaEditorWidget1114DevCtrl", jinjaEditorWidget1114DevCtrl)
     .directive("jinjaDraggable", jinjaDraggableDirective)
     .directive("jinjaHtmlPreview", jinjaHtmlPreviewDirective);
 
@@ -147,12 +147,13 @@
     };
   }
 
-  jinjaEditorWidget114DevCtrl.$inject = [
+  jinjaEditorWidget1114DevCtrl.$inject = [
     "$scope",
     "$rootScope",
     "$state",
     "$window",
     "$timeout",
+    "$injector",
     "config",
     "dynamicValueService",
     "Modules",
@@ -300,12 +301,13 @@
     return cache[WIDGET_BASE];
   }
 
-  function jinjaEditorWidget114DevCtrl(
+  function jinjaEditorWidget1114DevCtrl(
     $scope,
     $rootScope,
     $state,
     $window,
     $timeout,
+    $injector,
     config,
     dynamicValueService,
     Modules,
@@ -315,6 +317,236 @@
     $scope.config = config;
     $scope.angular = angular;
     $scope.widgetVersion = WIDGET_VERSION;
+
+    // When this widget is rendered inside SOAR's `#custom-modal` drawer,
+    // tag the host so our CSS width/positioning overrides apply. Centering
+    // is handled in CSS — see `.jinja-editor-widget-drawer-host#custom-modal`
+    // in jinjaEditorWidget.css.
+    //
+    // Tag synchronously during controller construction (not in $timeout) so
+    // the class is on the host before the browser paints. SOAR's launchWidget
+    // sets `display:inline` on #custom-modal immediately before loading our
+    // template (app.unmin.js:26247); a deferred tag would let the browser
+    // paint one frame at the default off-screen position, producing a visible
+    // flash + jump. We don't need to verify the .jinja-editor-widget element
+    // is present yet — only this widget's controller adds this class, and
+    // $destroy removes it before any other widget can mount.
+    var drawerHost = document.getElementById("custom-modal");
+    if (drawerHost) drawerHost.classList.add("jinja-editor-widget-drawer-host");
+    $scope.$on("$destroy", function () {
+      if (drawerHost) drawerHost.classList.remove("jinja-editor-widget-drawer-host");
+    });
+
+    // Playbook execution history: reuse SOAR's `csJinjaEditorLog` directive
+    // (defined in app.unmin.js). The directive populates a dropdown of recent
+    // debug-mode runs; "Load Env JSON" calls playbookService.getRunningPlaybookDetails
+    // and pushes {vars: env, vars.steps} into the input editor — same shape
+    // SOAR's built-in jinja editor uses (app.unmin.js:22889).
+    //
+    // Available only on `main.playbookDetail` and only when the directive is
+    // registered. In Dashboard / View Panel / harness contexts, $scope.playbookEntity
+    // stays falsy and the section is `ng-if`-hidden.
+    $scope.playbookEntity = null;
+    $scope.selectedRunningPlaybook = undefined;
+    $scope.envProcessing = false;
+    (function wirePlaybookHistory() {
+      try {
+        console.log("[JinjaWidget] wirePlaybookHistory: $state.current =", $state.current && $state.current.name);
+        if (!$state.current || $state.current.name !== "main.playbookDetail") {
+          console.log("[JinjaWidget] wirePlaybookHistory: bail — not on main.playbookDetail (got", $state.current && $state.current.name, ")");
+          return;
+        }
+        var hasDirective = $injector.has("csJinjaEditorLogDirective");
+        var hasPbService = $injector.has("playbookService");
+        console.log("[JinjaWidget] wirePlaybookHistory: csJinjaEditorLogDirective =", hasDirective, "playbookService =", hasPbService);
+        if (!hasDirective || !hasPbService) {
+          console.log("[JinjaWidget] wirePlaybookHistory: bail — required injectables missing");
+          return;
+        }
+        // Walk up the scope chain to find the designer's playbookEntity.
+        // PlaybookDesignerCtrl sets `playbookEntity` on its controller scope
+        // (app.unmin.js:32760). Drawer widgets compile inside that scope tree.
+        var s = $scope;
+        var depth = 0;
+        while (s) {
+          var ownKeys = Object.keys(s).filter(function (k) { return k[0] !== "$"; });
+          var interesting = ownKeys.filter(function (k) { return /playbook|designer|workflow|entity/i.test(k); });
+          console.log("[JinjaWidget] scope depth", depth,
+            "interesting keys:", interesting,
+            "playbookEntity:", s.playbookEntity,
+            "designer:", s.designer);
+          if (s.playbookEntity && s.playbookEntity["@id"]) {
+            $scope.playbookEntity = s.playbookEntity;
+            console.log("[JinjaWidget] found playbookEntity at scope depth", depth, s.playbookEntity);
+            break;
+          }
+          if (s.designer && s.designer.playbookEntity && s.designer.playbookEntity["@id"]) {
+            $scope.playbookEntity = s.designer.playbookEntity;
+            console.log("[JinjaWidget] found designer.playbookEntity at scope depth", depth, s.designer.playbookEntity);
+            break;
+          }
+          s = s.$parent;
+          depth++;
+        }
+        if (!$scope.playbookEntity) {
+          // Drawer widgets can be compiled outside the playbook designer's
+          // scope tree (e.g. when SOAR opens the widget in a $mdDialog /
+          // drawer that roots a new scope), so the ancestor walk above
+          // misses `playbookEntity`. Fall back to a DOM query: any element
+          // under a Playbook* controller inherits `playbookEntity` from
+          // PlaybookDesignerCtrl's prototype chain via Angular scope
+          // inheritance. The `id` check (rather than `@id`) is intentional
+          // — designer hands the entity around as `{id, name, …}` and the
+          // `@id` IRI may not be present on every code path.
+          try {
+            var ng = window.angular;
+            if (ng) {
+              var selectors = [
+                "[data-ng-controller*='PlaybookDesigner']",
+                "[ng-controller*='PlaybookDesigner']",
+                ".playbook-designer",
+                "#playbook-designer",
+                "[data-ng-controller*='Playbook']",
+                "[ng-controller*='Playbook']",
+              ];
+              for (var i = 0; i < selectors.length && !$scope.playbookEntity; i++) {
+                var el = document.querySelector(selectors[i]);
+                if (!el) continue;
+                var dscope = ng.element(el).scope();
+                var entity = dscope && (dscope.playbookEntity || (dscope.designer && dscope.designer.playbookEntity));
+                if (entity && (entity["@id"] || entity.id)) {
+                  $scope.playbookEntity = entity;
+                  console.log("[JinjaWidget] DOM-found playbookEntity via", selectors[i], entity);
+                  break;
+                }
+              }
+            }
+          } catch (e) {
+            console.warn("[JinjaWidget] DOM scope lookup failed:", e && e.message);
+          }
+          if (!$scope.playbookEntity) {
+            console.warn("[JinjaWidget] no playbookEntity found via scope walk or DOM — Load Env JSON row will be ng-if-hidden");
+          }
+        }
+        // csJinjaEditorLog needs more than `@id` — its link function calls
+        // `playbookService.getTriggerStep(playbookEntity)` (app.unmin.js:23121)
+        // and dereferences the returned step's `.arguments.resources`. That
+        // requires the full workflow record (with `steps[]`). The
+        // DOM-grabbed entity is just a thin Resource wrapper from
+        // DebugPlaybookCtrl's scope and is missing both `@id` and `steps`,
+        // which is why the directive throws "Cannot read properties of
+        // undefined (reading 'arguments')". Fetch the workflow ourselves.
+        var pbId = ($state.params && $state.params.id) ||
+          ($scope.playbookEntity && $scope.playbookEntity.id);
+        var needsFetch = pbId && (
+          !$scope.playbookEntity ||
+          !$scope.playbookEntity["@id"] ||
+          !Array.isArray($scope.playbookEntity.steps)
+        );
+        if (needsFetch) {
+          // Hide the row until the entity is ready — otherwise the directive
+          // links against a partial entity and crashes.
+          var savedEntity = $scope.playbookEntity;
+          $scope.playbookEntity = null;
+          var $http = $injector.get("$http");
+          $http.get("/api/3/workflows/" + pbId + "?$relationships=true").then(function (r) {
+            $scope.playbookEntity = r && r.data ? r.data : savedEntity;
+            console.log("[JinjaWidget] fetched workflow entity for dropdown filter:",
+              $scope.playbookEntity && $scope.playbookEntity["@id"],
+              "steps:", $scope.playbookEntity && Array.isArray($scope.playbookEntity.steps) ? $scope.playbookEntity.steps.length : "n/a");
+          }, function (err) {
+            console.warn("[JinjaWidget] failed to fetch workflow entity:", err && err.status, err && err.statusText);
+            $scope.playbookEntity = savedEntity;
+          });
+        }
+      } catch (err) {
+        console.warn("[JinjaWidget] playbook history wiring skipped:", err && err.message);
+      }
+    })();
+
+    // SOAR's csJinjaEditorLog directive only fetches the running-playbook list
+    // once, in its link-time IIFE (app.unmin.js:23116-23126). The drawer keeps
+    // the widget's DOM/scope alive across opens, so the list goes stale until
+    // page reload. Re-run the same query whenever the drawer transitions from
+    // hidden to visible, by calling playbookService directly and replacing the
+    // directive's isolate-scope `runningPlaybooks` (the same shape its `i()`
+    // closure produces).
+    (function watchDrawerForRefresh() {
+      var modal = document.getElementById("custom-modal");
+      if (!modal || typeof MutationObserver === "undefined") return;
+      var wasVisible = modal.offsetParent !== null;
+      function refresh() {
+        if (!$scope.playbookEntity || !$scope.playbookEntity["@id"]) return;
+        var el = document.querySelector(
+          "[data-cs-jinja-editor-log], [cs-jinja-editor-log]"
+        );
+        if (!el) return;
+        var iso = angular.element(el).isolateScope();
+        if (!iso) return;
+        var playbookService;
+        try { playbookService = $injector.get("playbookService"); } catch (_) { return; }
+        var STORAGE;
+        try { STORAGE = $injector.get("PLAYBOOK_STORAGE_TYPES"); } catch (_) { return; }
+        playbookService.getRunningPlaybooks(
+          { template_iri: $scope.playbookEntity["@id"], debug: true },
+          STORAGE.ACTIVE
+        ).then(function (res) {
+          var list = (res && res["hydra:member"]) || [];
+          iso.$apply(function () {
+            iso.runningPlaybooks = list;
+            if (list.length === 0) {
+              iso.value = undefined;
+            } else {
+              iso.value = {
+                id: list[0]["@id"],
+                name: list[0].name,
+                status: list[0].status,
+                modified: list[0].modified,
+              };
+            }
+          });
+        });
+      }
+      var mo = new MutationObserver(function () {
+        var visible = modal.offsetParent !== null;
+        if (visible && !wasVisible) refresh();
+        wasVisible = visible;
+      });
+      mo.observe(modal, { attributes: true, attributeFilter: ["style", "class"] });
+      $scope.$on("$destroy", function () { mo.disconnect(); });
+    })();
+
+    $scope.loadRunningPlaybook = function (pb) {
+      if (!pb || !pb.id) return;
+      var playbookService;
+      try { playbookService = $injector.get("playbookService"); } catch (_) { return; }
+      $scope.envProcessing = true;
+      // `step_detail=true` is required: without it the API returns `steps`
+      // as an array of step summaries with `result === undefined` (verified
+      // against /api/wf/api/workflows/<id>/). With it, each step has a real
+      // `result` field. SOAR then transforms the array into a name→result
+      // map (app.unmin.js:25011) so templates can reference
+      // `vars.steps.<step_name_with_underscores>` (app.unmin.js:24418).
+      playbookService.getRunningPlaybookDetails(pb.id, { step_detail: true }).then(function (res) {
+        var values = { vars: (res && res.env) || {} };
+        if (res && Array.isArray(res.steps)) {
+          var stepsMap = {};
+          res.steps.forEach(function (step) {
+            if (step && typeof step.name === "string") {
+              stepsMap[step.name.split(" ").join("_")] = step.result || {};
+            }
+          });
+          values.vars.steps = stepsMap;
+        }
+        try {
+          setInputJson(JSON.stringify(values, null, 2));
+        } catch (e) {
+          toaster.error({ body: "Failed to load env JSON: " + (e && e.message) });
+        }
+      }).finally(function () {
+        $scope.envProcessing = false;
+      });
+    };
 
     $scope.processing = false;
     $scope.loadingRecord = false;
@@ -327,7 +559,7 @@
 
     // Pane layout preset. Stored per-browser so the choice survives reloads.
     const LAYOUT_STORAGE_KEY = "jinjaEditorWidget.layoutPreset";
-    const VALID_LAYOUTS = ["equal", "outputFocus", "templateFocus", "stacked"];
+    const VALID_LAYOUTS = ["equal", "outputFocus", "templateFocus", "splitBottom", "stacked"];
     $scope.layoutPreset = (function () {
       try {
         const saved = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
@@ -345,15 +577,26 @@
       switch ($scope.layoutPreset) {
         case "outputFocus":   return { input: "col-sm-3", template: "col-sm-3", output: "col-sm-6" };
         case "templateFocus": return { input: "col-sm-3", template: "col-sm-6", output: "col-sm-3" };
+        case "splitBottom":   return { input: "col-sm-6", template: "col-sm-6", output: "col-sm-12 jinja-pane-bottom" };
         case "stacked":       return { input: "col-sm-12", template: "col-sm-12", output: "col-sm-12" };
         default:              return { input: "col-sm-4", template: "col-sm-4", output: "col-sm-4" };
       }
     };
 
-    // Output expand-modal state.
+    // Expand-modal state for output, input, and template panes. Each pane has
+    // its own flag so opening one doesn't affect the others, and the modal
+    // bodies render their own Monaco panes (configs below) bound to the same
+    // ng-model values, so edits made in the modal flow back through the
+    // existing watchers.
     $scope.outputModalOpen = false;
+    $scope.inputModalOpen = false;
+    $scope.templateModalOpen = false;
     $scope.openOutputModal = function () { $scope.outputModalOpen = true; };
     $scope.closeOutputModal = function () { $scope.outputModalOpen = false; };
+    $scope.openInputModal = function () { $scope.inputModalOpen = true; };
+    $scope.closeInputModal = function () { $scope.inputModalOpen = false; };
+    $scope.openTemplateModal = function () { $scope.templateModalOpen = true; };
+    $scope.closeTemplateModal = function () { $scope.templateModalOpen = false; };
     $scope.inputJsonError = null;
     $scope.monacoReady = false;
 
@@ -447,6 +690,20 @@
       scrollBeyondLastLine: false,
       fontSize: 12,
       tabSize: 2,
+      scrollbar: { alwaysConsumeMouseWheel: false },
+    };
+    // Modal twin of inputEditorConfig — see outputJsonModalEditorConfig for
+    // the rationale (the monaco directive mutates configs in place).
+    $scope.inputModalEditorConfig = {
+      language: "json",
+      theme: currentMonacoTheme(),
+      automaticLayout: true,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      fontSize: 13,
+      tabSize: 2,
+      lineNumbers: "on",
+      scrollbar: { alwaysConsumeMouseWheel: false },
     };
     $scope.templateEditorConfig = {
       language: "jinja",
@@ -465,6 +722,26 @@
       // Render hover/suggestion widgets in a fixed-position layer attached to
       // <body> so they aren't clipped by ancestors with overflow:hidden.
       fixedOverflowWidgets: true,
+      scrollbar: { alwaysConsumeMouseWheel: false },
+    };
+    // Modal twin of templateEditorConfig.
+    $scope.templateModalEditorConfig = {
+      language: "jinja",
+      theme: currentMonacoTheme(),
+      automaticLayout: true,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      fontSize: 13,
+      tabSize: 2,
+      autoClosingBrackets: "always",
+      autoClosingQuotes: "always",
+      autoSurround: "languageDefined",
+      matchBrackets: "always",
+      bracketPairColorization: { enabled: true },
+      "semanticHighlighting.enabled": true,
+      fixedOverflowWidgets: true,
+      lineNumbers: "on",
+      scrollbar: { alwaysConsumeMouseWheel: false },
     };
 
     // React to the user switching SOAR themes at runtime.
@@ -1581,6 +1858,14 @@
       if (event.key !== "Escape") return;
       if ($scope.outputModalOpen) {
         $scope.$applyAsync(function () { $scope.outputModalOpen = false; });
+        return;
+      }
+      if ($scope.inputModalOpen) {
+        $scope.$applyAsync(function () { $scope.inputModalOpen = false; });
+        return;
+      }
+      if ($scope.templateModalOpen) {
+        $scope.$applyAsync(function () { $scope.templateModalOpen = false; });
         return;
       }
       if ($scope.filterPaletteOpen) {
