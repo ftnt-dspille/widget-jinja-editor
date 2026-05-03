@@ -137,11 +137,18 @@ global.JinjaEditorWidget = {
 // Register cybersponse before the controller IIFE runs.
 angular.module("cybersponse", []); // eslint-disable-line no-undef
 
-// Side-effect require: executes the controller IIFE, registering
-// jinjaEditorWidget114DevCtrl against the cybersponse module.
+// Side-effect require: executes the controller IIFE, registering the
+// versioned controller (e.g. jinjaEditorWidget1114DevCtrl for v1.1.14)
+// against the cybersponse module.
 require("../widget/view.controller.js");
 
-const CTRL_NAME = "jinjaEditorWidget114DevCtrl";
+// Derive controller name from info.json so a version bump doesn't drift
+// the test out of sync with the registered controller. Pattern matches
+// the harness's deriveViewControllerName: "<name><versionDigits>DevCtrl",
+// where versionDigits strips dots from the semver string.
+const widgetInfo = require("../widget/info.json");
+const CTRL_NAME =
+  widgetInfo.name + widgetInfo.version.replace(/\./g, "") + "DevCtrl";
 
 // Capture angular after both require('angular') and require('angular-mocks')
 // have run. angular-mocks adds .mock to window.angular in the same tick.
@@ -517,6 +524,10 @@ describe("filter palette", () => {
   test("toggleFilterPalette opens the palette and populates groups", () => {
     const { scope } = createCtrl();
     scope.toggleFilterPalette();
+    // Group population is deferred via $timeout (see view.controller.js
+    // toggleFilterPalette — it reads the live DOM input value after the
+    // next digest cycle). Flush the timeout so assertions see the result.
+    $timeout.flush();
     expect(scope.filterPaletteOpen).toBe(true);
     expect(scope.filterPaletteGroups.length).toBeGreaterThan(0);
   });
@@ -524,17 +535,22 @@ describe("filter palette", () => {
   test("toggleFilterPalette closes when already open", () => {
     const { scope } = createCtrl();
     scope.toggleFilterPalette();
+    $timeout.flush();
     scope.toggleFilterPalette();
     expect(scope.filterPaletteOpen).toBe(false);
   });
 
-  test("closeFilterPalette resets query and closes", () => {
+  test("closeFilterPalette closes but preserves the query", () => {
     const { scope } = createCtrl();
     scope.toggleFilterPalette();
+    $timeout.flush();
     scope.filterPaletteQuery = "upper";
     scope.closeFilterPalette();
+    // Implementation deliberately preserves filterPaletteQuery so reopening
+    // the palette restores the user's last search (see comment in
+    // closeFilterPalette in view.controller.js).
     expect(scope.filterPaletteOpen).toBe(false);
-    expect(scope.filterPaletteQuery).toBe("");
+    expect(scope.filterPaletteQuery).toBe("upper");
   });
 
   test("closeFilterPalette is a no-op when already closed", () => {
