@@ -6,9 +6,9 @@
 (function () {
   angular
     .module("cybersponse")
-    .controller("editJinjaEditorWidget1114DevCtrl", editJinjaEditorWidget1114DevCtrl);
+    .controller("editJinjaEditorWidget122DevCtrl", editJinjaEditorWidget122DevCtrl);
 
-  editJinjaEditorWidget1114DevCtrl.$inject = [
+  editJinjaEditorWidget122DevCtrl.$inject = [
     "$scope",
     "$state",
     "$uibModalInstance",
@@ -16,7 +16,7 @@
     "Entity",
   ];
 
-  function editJinjaEditorWidget1114DevCtrl(
+  function editJinjaEditorWidget122DevCtrl(
     $scope,
     $state,
     $uibModalInstance,

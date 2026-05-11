@@ -1925,6 +1925,80 @@ describe("checkInputPaths() — field path warnings", () => {
     );
     expect(warnings).toHaveLength(0);
   });
+
+  // Regression: paths inside {% set/if/for %} tags must be validated, not
+  // just bare {{ expr }} blocks. A template like
+  //   {% set score = vars.input.records[0].typo %}{{ score }}
+  // would pass the legacy {{ }}-only checker (`score` is bound locally) and
+  // only fail at the SOAR engine. Pass-2 scans rooted refs anywhere.
+  test("flags missing path inside {% set %} expression", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{% set score = vars.input.records[0].typoField %}{{ score }}",
+      JSON.stringify({ vars: { input: { records: [{ risk_score: 72 }] } } })
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0].message).toMatch(/typoField.*not found/i);
+  });
+
+  test("flags missing path inside {% if %} comparison", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{% if vars.input.records[0].nope >= 80 %}HIGH{% endif %}",
+      JSON.stringify({ vars: { input: { records: [{ score: 72 }] } } })
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings.some(w => /nope.*not found/i.test(w.message))).toBe(true);
+  });
+
+  test("flags missing path on RHS of {% for x in ... %}", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{% for r in vars.input.missingList %}{{ r }}{% endfor %}",
+      JSON.stringify({ vars: { input: { records: [] } } })
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0].message).toMatch(/missingList.*not found/i);
+  });
+
+  test("does NOT flag the loop variable name itself in `{% for x in ... %}`", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{% for r in vars.input.records %}{{ r.name }}{% endfor %}",
+      JSON.stringify({ vars: { input: { records: [{ name: "Ada" }] } } })
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("does NOT flag the LHS of `{% set x = ... %}`", () => {
+    const { scope } = createCtrl();
+    $rootScope.$apply();
+    try { $timeout.flush(); } catch (_) {}
+
+    const warnings = submitAndGetWarnings(
+      scope,
+      "{% set vars = vars.input.records[0].score %}{{ vars }}",
+      JSON.stringify({ vars: { input: { records: [{ score: 72 }] } } })
+    );
+    // RHS resolves; LHS shadow shouldn't produce an unrelated warning.
+    expect(warnings).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@
 
   angular
     .module("cybersponse")
-    .controller("jinjaEditorWidget1114DevCtrl", jinjaEditorWidget1114DevCtrl)
+    .controller("jinjaEditorWidget122DevCtrl", jinjaEditorWidget122DevCtrl)
     .directive("jinjaDraggable", jinjaDraggableDirective)
     .directive("jinjaHtmlPreview", jinjaHtmlPreviewDirective);
 
@@ -147,7 +147,7 @@
     };
   }
 
-  jinjaEditorWidget1114DevCtrl.$inject = [
+  jinjaEditorWidget122DevCtrl.$inject = [
     "$scope",
     "$rootScope",
     "$state",
@@ -301,7 +301,7 @@
     return cache[WIDGET_BASE];
   }
 
-  function jinjaEditorWidget1114DevCtrl(
+  function jinjaEditorWidget122DevCtrl(
     $scope,
     $rootScope,
     $state,
@@ -467,14 +467,10 @@
     // SOAR's csJinjaEditorLog directive only fetches the running-playbook list
     // once, in its link-time IIFE (app.unmin.js:23116-23126). The drawer keeps
     // the widget's DOM/scope alive across opens, so the list goes stale until
-    // page reload. Re-run the same query whenever the drawer transitions from
-    // hidden to visible, by calling playbookService directly and replacing the
-    // directive's isolate-scope `runningPlaybooks` (the same shape its `i()`
-    // closure produces).
+    // page reload. Re-run the same query on every drawer open by listening to
+    // the 'popupOpened' event that SOAR $rootScope-broadcasts (app.unmin.js:26248).
+    // Fetch both ACTIVE and HISTORICAL so completed executions appear too.
     (function watchDrawerForRefresh() {
-      var modal = document.getElementById("custom-modal");
-      if (!modal || typeof MutationObserver === "undefined") return;
-      var wasVisible = modal.offsetParent !== null;
       function refresh() {
         if (!$scope.playbookEntity || !$scope.playbookEntity["@id"]) return;
         var el = document.querySelector(
@@ -487,11 +483,21 @@
         try { playbookService = $injector.get("playbookService"); } catch (_) { return; }
         var STORAGE;
         try { STORAGE = $injector.get("PLAYBOOK_STORAGE_TYPES"); } catch (_) { return; }
-        playbookService.getRunningPlaybooks(
-          { template_iri: $scope.playbookEntity["@id"], debug: true },
-          STORAGE.ACTIVE
-        ).then(function (res) {
-          var list = (res && res["hydra:member"]) || [];
+        var params = { template_iri: $scope.playbookEntity["@id"], debug: true };
+        var activeReq = playbookService.getRunningPlaybooks(params, STORAGE.ACTIVE);
+        var histReq = playbookService.getRunningPlaybooks(params, STORAGE.HISTORICAL);
+        Promise.all([activeReq, histReq]).then(function (results) {
+          var active = (results[0] && results[0]["hydra:member"]) || [];
+          var historical = (results[1] && results[1]["hydra:member"]) || [];
+          var seen = {};
+          var list = active.concat(historical).filter(function (pb) {
+            var id = pb["@id"];
+            if (seen[id]) return false;
+            seen[id] = true;
+            return true;
+          }).sort(function (a, b) {
+            return new Date(b.modified) - new Date(a.modified);
+          });
           iso.$apply(function () {
             iso.runningPlaybooks = list;
             if (list.length === 0) {
@@ -507,13 +513,7 @@
           });
         });
       }
-      var mo = new MutationObserver(function () {
-        var visible = modal.offsetParent !== null;
-        if (visible && !wasVisible) refresh();
-        wasVisible = visible;
-      });
-      mo.observe(modal, { attributes: true, attributeFilter: ["style", "class"] });
-      $scope.$on("$destroy", function () { mo.disconnect(); });
+      $rootScope.$on("popupOpened", refresh);
     })();
 
     $scope.loadRunningPlaybook = function (pb) {
@@ -1384,8 +1384,40 @@
       const lines = templateText.split("\n");
       const pathsChecked = new Set();
       const localNames = collectLocalNames(templateText);
+
+      // Anchor pass-2 scanning on the actual top-level keys present in the
+      // input ("vars", typically). Anchoring on a known root keeps us from
+      // false-flagging local names, identifiers from string literals, etc.
+      const rootKeys = Object.keys(inputData || {}).filter(function (k) {
+        return /^[A-Za-z_][\w]*$/.test(k);
+      });
+      const rootRe = rootKeys.length
+        ? new RegExp(
+            "(?<![\\w.'\"])(" + rootKeys.join("|") + ")((?:\\.[A-Za-z_][\\w]*|\\[\\d+\\])*)",
+            "g"
+          )
+        : null;
+
+      function record(lineNum, path) {
+        if (pathsChecked.has(path)) return;
+        pathsChecked.add(path);
+        const rootMatch = path.match(/^([A-Za-z_][\w]*)/);
+        if (rootMatch && localNames.has(rootMatch[1])) return;
+        const res = resolveInputPath(inputData, path);
+        if (!res.found) {
+          findings.push({
+            line: lineNum + 1,
+            path: path,
+            message: '"' + path + '" was not found in the test input — check the field name',
+          });
+        }
+      }
+
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const line = lines[lineNum];
+
+        // Pass 1: bare {{ expr }} outputs — strips filter chain, skips
+        // literals/keywords. This is the legacy behavior.
         const exprRegex = /\{\{([^}]*)\}\}/g;
         let match;
         while ((match = exprRegex.exec(line)) !== null) {
@@ -1398,17 +1430,36 @@
               expr.match(/^(if|for|with|macro|call|set|block|extends|include)\s/i)) {
             continue;
           }
-          const rootMatch = expr.match(/^([A-Za-z_][\w]*)/);
-          if (rootMatch && localNames.has(rootMatch[1])) continue;
-          if (pathsChecked.has(expr)) continue;
-          pathsChecked.add(expr);
-          const res = resolveInputPath(inputData, expr);
-          if (!res.found) {
-            findings.push({
-              line: lineNum + 1,
-              path: expr,
-              message: '"' + expr + '" was not found in the test input — check the field name',
-            });
+          record(lineNum, expr);
+        }
+
+        // Pass 2: rooted references anywhere on the line (covers {% %} tags
+        // and any expression context). A `{% set x = vars.input.records[0].nope %}`
+        // is invisible to pass 1, so without this the bad path slips
+        // straight through to runtime.
+        if (rootRe) {
+          rootRe.lastIndex = 0;
+          let rm;
+          while ((rm = rootRe.exec(line)) !== null) {
+            const upto = line.slice(0, rm.index);
+            // Skip references inside a {# comment #}.
+            const openComment = upto.lastIndexOf("{#");
+            const closeComment = upto.lastIndexOf("#}");
+            if (openComment !== -1 && openComment > closeComment) continue;
+            // Skip references inside an unterminated string literal.
+            const sq = (upto.match(/'/g) || []).length;
+            const dq = (upto.match(/"/g) || []).length;
+            if (sq % 2 === 1 || dq % 2 === 1) continue;
+            // Skip the LHS of `{% set x = ... %}` — it's the name being defined.
+            if (/\{%-?\s*set\s+$/.test(upto)) continue;
+            // Skip the loop var(s) of `{% for x in ... %}` (between for and in).
+            const tagOpen = upto.lastIndexOf("{%");
+            const tagClose = upto.lastIndexOf("%}");
+            if (tagOpen !== -1 && tagOpen > tagClose) {
+              const inTag = upto.slice(tagOpen);
+              if (/\bfor\s+[\w,\s]*$/.test(inTag) && !/\bin\s+/.test(inTag)) continue;
+            }
+            record(lineNum, rm[0]);
           }
         }
       }
